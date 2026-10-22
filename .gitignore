@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+data/*
+!data/.gitkeep
+ytindex.toml
+.env
+cookies.txt
