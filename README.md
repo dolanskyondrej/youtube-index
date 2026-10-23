@@ -112,24 +112,25 @@ Příklad odpovědi `/api/search?q=bitcoin`:
 `highlighted` obsahuje **pouze** značky `<mark>`; frontend zbytek escapuje (viz `ytindex/web/index.html`).
 Víc kanálů = víc instancí (každý kanál má vlastní `ytindex.toml` + DB), API je na kanálu nezávislé.
 
-## Google Cloud (produkční nasazení)
+## Google Cloud (produkční nasazení, < 1 USD/měsíc)
 
-Kompletní návod a architektura v [deploy/README.md](deploy/README.md). Zkráceně:
+Kompletní návod v [deploy/README.md](deploy/README.md). Zkráceně:
 
 ```bash
 gcloud auth login && gcloud config set project youtube-index-512512
-GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" ./deploy/deploy.sh
-gcloud run jobs execute ytindex-ingest --region europe-west1 --args cloud-ingest,--limit,10 --wait   # test 10 videí
+GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" YTINDEX_LIMIT=10 ./deploy/deploy.sh
 ```
 
-* **Cloud Run service** `ytindex cloud-serve`: web + REST API + MCP (`/mcp`) v jednom kontejneru.
-* **Cloud Run Job** `ytindex cloud-ingest`: indexace přes Gemini (z cloudu jsou YouTube titulky blokované), resumable,
-  paralelizovatelná přes `--tasks N` (shardování podle `CLOUD_RUN_TASK_INDEX`).
-* **Cloud SQL PostgreSQL 16 + pgvector + unaccent**: nastavením `DATABASE_URL=postgresql://…` se místo SQLite použije
-  backend `ytindex/db_postgres.py` (tsvector s konfigurací `cs_simple` = fulltext bez diakritiky, HNSW index pro
-  cosine vzdálenost). Stejné API, stejné hledání.
-* Klíče jdou výhradně přes Secret Manager / env (`GEMINI_API_KEY`, `DATABASE_URL`); konfigurace kanálu přes
-  `YTINDEX_CHANNEL` (bez `ytindex.toml`).
+* **Cloud Run service** `ytindex cloud-serve`: web + REST API + MCP (`/mcp`) v jednom kontejneru, škáluje na 0
+  (při malém provozu v rámci free tieru).
+* **SQLite index v Cloud Storage** (`YTINDEX_GCS_DB=gs://…/index.sqlite`): žádný databázový server. Instance si index
+  stáhne při startu; po nové indexaci se nahraje zpět (`ytindex cloud-ingest`) nebo ručně
+  (`gcloud storage cp data/index.sqlite gs://…`). Cena úložiště: centy.
+* **Cloud Run Job** `ytindex cloud-ingest`: indexace přes Gemini (z cloudu jsou YouTube titulky blokované), resumable;
+  `YTINDEX_LIMIT=10` omezí test na prvních 10 videí. Levnější cesta: indexovat doma z titulků a index jen nahrát.
+* Volitelně **PostgreSQL + pgvector** (`DATABASE_URL=postgresql://…`, backend `ytindex/db_postgres.py`) pro větší
+  provoz nebo více zapisujících procesů; stejné API i hledání.
+* Klíče jdou výhradně přes Secret Manager / env (`GEMINI_API_KEY`); kanál přes `YTINDEX_CHANNEL` (bez `ytindex.toml`).
 
 ## MCP server (hledání z Claude / jiných AI)
 

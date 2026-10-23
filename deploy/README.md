@@ -1,50 +1,49 @@
-# Nasazení na Google Cloud
+# Nasazení na Google Cloud (levná varianta)
 
 ```
-┌──────────────┐    ┌────────────────────────┐    ┌──────────────────────────┐
-│ Cloud Run Job│    │ Cloud Run service      │    │ Cloud SQL PostgreSQL 16  │
-│ ytindex-     │───►│ ytindex (web + REST    │◄──►│ + pgvector (HNSW, cosine)│
-│ ingest       │    │ API + MCP na /mcp)     │    │ + tsvector/unaccent FTS  │
-└──────┬───────┘    └────────────────────────┘    └──────────────────────────┘
-       │ transkripty (Gemini video understanding z YouTube URL) + embeddingy (gemini-embedding-001)
-       ▼
-   Gemini API
+┌────────────────────┐   stáhne při startu   ┌──────────────────────────┐   nahraje po doběhu   ┌────────────────────┐
+│ Cloud Run service  │◄──────────────────────│ Cloud Storage            │◄──────────────────────│ Cloud Run Job      │
+│ ytindex            │                       │ gs://<projekt>-ytindex/  │                       │ ytindex-ingest     │
+│ web + API + /mcp   │                       │ index.sqlite             │                       │ (Gemini přepis +   │
+│ škáluje 0 → 2      │                       │ (FTS5 + sqlite-vec)      │                       │  embeddingy)       │
+└────────────────────┘                       └──────────────────────────┘                       └────────────────────┘
 ```
 
-* **Cloud Run service** – bezstavový kontejner (`ytindex cloud-serve`), škáluje 0→N, cena prakticky 0 při nízkém provozu.
-* **Cloud Run Job** – `ytindex cloud-ingest [--limit N]`; stejný image. Z cloudu YouTube blokuje stahování titulků,
-  proto job používá provider **gemini** (Gemini si video stáhne sám). Spouštět ručně nebo přes Cloud Scheduler.
-* **Cloud SQL** – „speciální DB“: jeden Postgres s rozšířeními `vector` (sémantické hledání) a `unaccent`
-  (fulltext bez diakritiky). Nejmenší tier `db-f1-micro` stačí; pro větší provoz `db-custom-1-3840`.
-* **Secret Manager** – `GEMINI_API_KEY`, `DATABASE_URL`. Klíče nikdy necommitovat.
+| Položka | Cena (odhad) |
+|---|---|
+| Cloud Run service, min-instances 0, pár tisíc dotazů/měsíc | 0 USD (free tier 2 M požadavků, 180 k vCPU‑s) |
+| Cloud Storage, index 17 MB (10 videí) / ~400 MB (celý kanál) | < 0,01 USD |
+| Artifact Registry, image ~300 MB | ~0,03 USD |
+| Secret Manager, 1 secret | 0 USD (free tier) |
+| Cloud Run Job, indexace celého kanálu (~4 h vCPU jednorázově) | ~0,40 USD |
+| Gemini (přepis 1 500 h + embeddingy, jednorázově) | ~75 USD + ~2 USD |
 
-## Jednorázové nasazení
+Běžný provoz tedy pod 1 USD/měsíc. Alternativa e2-micro VM je ve free tieru jen v USA, vyžaduje údržbu (TLS, aktualizace)
+a není levnější.
+
+## Nasazení
 
 ```bash
-gcloud auth login
+gcloud auth login                       # nebo: gcloud auth activate-service-account --key-file klic.json
 gcloud config set project youtube-index-512512
-GEMINI_API_KEY=... CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" ./deploy/deploy.sh
+GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" YTINDEX_LIMIT=10 ./deploy/deploy.sh
 ```
 
-Skript zapne API, založí Artifact Registry, Cloud SQL, secrets, sestaví image přes Cloud Build a nasadí service + job.
-Na konci vypíše URL aplikace a příkazy pro indexaci.
+Skript zapne API, založí bucket, Artifact Registry a secret, sestaví image přes Cloud Build a nasadí service + job.
+Je idempotentní: další spuštění jen nasadí novou verzi.
 
-## Test na 10 videích → celý kanál
+## Index: lokálně nebo v cloudu
 
-```bash
-gcloud run jobs execute ytindex-ingest --region europe-west1 --args cloud-ingest,--limit,10 --wait
-# zkontrolovat https://<url>/?q=svoboda a https://<url>/api/channel, pak:
-gcloud run jobs execute ytindex-ingest --region europe-west1 --wait
-```
+* **Lokálně (levně, z titulků):** `ytindex ingest` doma → `gcloud storage cp data/index.sqlite gs://<projekt>-ytindex/index.sqlite`.
+* **V cloudu (Gemini):** `gcloud run jobs execute ytindex-ingest --region europe-west1 --wait`
+  (`YTINDEX_LIMIT` v env jobu omezuje počet videí; bez něj celý kanál, job je resumable, limit 24 h na běh).
 
-Celý kanál (~1 500 h) = cca 11 000 požadavků po 10 min videa; job běží sekvenčně ~2 dny (limit tasku 24 h → spustit
-opakovaně, ingest je resumable), nebo `--tasks 4` s paralelizací (viz `cloud-ingest --shard`).
-Odhad ceny Gemini 3.5 Flash‑Lite: ~115 k tokenů/h videa ≈ 0,05 USD/h → **~75 USD za celý kanál**, embeddingy ~2 USD.
+Služba po nahrání nového indexu začne nový index používat, jakmile se vytvoří nová instance (škáluje na 0, tj.
+po ~15 min klidu). Vynutit ihned: `gcloud run services update ytindex --region europe-west1 --update-env-vars INDEX_VERSION=$(date +%s)`.
+
+Paměť: pro 10 videí stačí 512 Mi–1 Gi; celý kanál (~100 k chunků × 768 d) nastav `MEMORY=2Gi` (index se drží v `/tmp`, což je RAM).
 
 ## MCP v Claude
 
-Vzdálený server (claude.ai / Claude Desktop → Settings → Connectors → Add custom connector):
-`https://<url>/mcp`
-
-Lokálně (Claude Code): `claude mcp add --transport http ytindex https://<url>/mcp`
-nebo stdio: `claude mcp add ytindex -- ytindex mcp` (v adresáři s `ytindex.toml`).
+* claude.ai / Claude Desktop → Settings → Connectors → Add custom connector → `https://<url>/mcp`
+* Claude Code: `claude mcp add --transport http ytindex https://<url>/mcp`
