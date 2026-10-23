@@ -66,7 +66,10 @@ ytindex search "daně jsou krádež"
 ytindex serve                   # http://localhost:8000  (API docs: /docs)
 ```
 
-Opakované `ytindex ingest` stáhne jen nová videa (stav `pending`); `--retry` zkusí znovu `failed`/`missing`.
+Opakované `ytindex ingest` stáhne jen nová videa (stav `pending`); `--retry` zkusí znovu `failed`/`missing`;
+`--ids a,b,c` zpracuje jen vybraná videa (hodí se na paralelní běh ve více procesech).
+`ytindex copy --to postgresql://…` přenese hotový index (včetně embeddingů) z lokálního SQLite do Cloud SQL,
+takže levná cesta je: indexovat doma z titulků zdarma → nahrát do cloudu.
 Embeddingy se počítají automaticky, pokud je `GEMINI_API_KEY` (`--no-embed` vypne; `ytindex embed` dopočítá).
 
 Docker: `docker compose up -d` (servíruje hotový `data/index.sqlite` + `ytindex.toml`).
