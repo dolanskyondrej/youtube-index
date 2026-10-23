@@ -173,10 +173,12 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
 
     @app.get("/api/videos", response_model=VideoListOut)
     def videos(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=200),
-               status: str | None = Query(None, pattern="^(pending|done|missing|failed)$"),
+               status: str | None = Query("done", pattern="^(pending|done|missing|failed|all)$",
+                                          description="Výchozí jen videa s transkriptem (done); all = všechna"),
                order: str = Query("published_at DESC")):
-        rows = db.list_videos(status=status, limit=per_page, offset=(page - 1) * per_page, order=order)
-        return {"total": db.count_videos(status=status), "page": page, "per_page": per_page,
+        st = None if status == "all" else status
+        rows = db.list_videos(status=st, limit=per_page, offset=(page - 1) * per_page, order=order)
+        return {"total": db.count_videos(status=st), "page": page, "per_page": per_page,
                 "items": [_video_out(r) for r in rows]}
 
     @app.get("/api/videos/{video_id}", response_model=VideoDetailOut)

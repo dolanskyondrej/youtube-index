@@ -294,6 +294,6 @@ class PostgresDatabase:
         st = {r["transcript_status"]: r["c"] for r in self._all(
             "SELECT transcript_status, COUNT(*) AS c FROM videos GROUP BY transcript_status")}
         embedded, chunks = self.count_embedded()
-        hours = self._one("SELECT COALESCE(SUM(duration_s),0)/3600.0 AS h FROM videos")["h"]
+        hours = self._one("SELECT COALESCE(SUM(duration_s),0)/3600.0 AS h FROM videos WHERE transcript_status='done'")["h"]
         return {"backend": self.backend, "videos": self.count_videos(), "videos_by_status": st, "chunks": chunks,
                 "chunks_embedded": embedded, "total_hours": round(float(hours), 1), "vector_search": embedded > 0}

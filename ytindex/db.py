@@ -332,14 +332,14 @@ class Database:
         st = {r["transcript_status"]: r["c"] for r in self.conn.execute(
             "SELECT transcript_status, COUNT(*) c FROM videos GROUP BY transcript_status")}
         embedded, chunks = self.count_embedded()
-        hours = self.conn.execute("SELECT COALESCE(SUM(duration_s),0)/3600.0 FROM videos").fetchone()[0]
+        hours = self.conn.execute("SELECT COALESCE(SUM(duration_s),0)/3600.0 FROM videos WHERE transcript_status='done'").fetchone()[0]
         return {
             "backend": self.backend,
             "videos": self.count_videos(),
             "videos_by_status": st,
             "chunks": chunks,
             "chunks_embedded": embedded,
-            "total_hours": round(hours, 1),
+            "total_hours": round(hours, 1),   # hodiny zaindexovaných videí
             "vector_search": self.vec_available and embedded > 0,
         }
 

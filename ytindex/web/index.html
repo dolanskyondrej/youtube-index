@@ -63,7 +63,7 @@ async function loadChannel(){
     const c = await r.json();
     $('#chname').textContent = c.name; $('#chname').href = c.url; document.title = c.name + ' – hledání';
     const s = c.stats, done = (s.videos_by_status||{}).done||0;
-    $('#chstats').textContent = `${s.videos} videí · ${done} s transkriptem · ${s.total_hours} h · ${s.vector_search?'hybridní':'fulltextové'} hledání`;
+    $('#chstats').textContent = `${done} z ${s.videos} videí zaindexováno · ${s.total_hours} h přepisů · ${s.vector_search?'hybridní':'fulltextové'} hledání`;
   }catch{ $('#chstats').textContent = 'Kanál zatím není inicializován (ytindex init / ingest).'; }
 }
 

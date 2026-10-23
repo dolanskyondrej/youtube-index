@@ -18,6 +18,9 @@ def test_api_endpoints(cfg, db):
 
     v = client.get("/api/videos", params={"per_page": 2}).json()
     assert v["total"] == 3 and len(v["items"]) == 2
+    db.set_transcript_status("vid00000003", "pending")
+    assert client.get("/api/videos").json()["total"] == 2            # výchozí jen done
+    assert client.get("/api/videos", params={"status": "all"}).json()["total"] == 3
 
     d = client.get("/api/videos/vid00000002").json()
     assert d["transcript_status"] == "done" and len(d["segments"]) == 3

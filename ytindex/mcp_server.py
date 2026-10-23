@@ -76,11 +76,12 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
                 "transcript_status": v["transcript_status"], "segments": segs}
 
     @mcp.tool()
-    def list_videos(page: int = 1, per_page: int = 50, status: str | None = None) -> dict:
-        """Seznam videí kanálu (nejnovější první). status: done | pending | missing | failed."""
+    def list_videos(page: int = 1, per_page: int = 50, status: str = "done") -> dict:
+        """Seznam videí kanálu (nejnovější první). status: done (výchozí, jen videa s přepisem) | pending | missing | failed | all."""
         per_page = max(1, min(per_page, 200))
-        rows = db.list_videos(status=status, limit=per_page, offset=(max(page, 1) - 1) * per_page)
-        return {"total": db.count_videos(status=status), "page": page, "items": [
+        st = None if status == "all" else status
+        rows = db.list_videos(status=st, limit=per_page, offset=(max(page, 1) - 1) * per_page)
+        return {"total": db.count_videos(status=st), "page": page, "items": [
             {"video_id": r["id"], "title": r["title"], "url": f"https://www.youtube.com/watch?v={r['id']}",
              "published_at": r["published_at"], "duration_s": r["duration_s"],
              "transcript_status": r["transcript_status"]} for r in rows]}
