@@ -132,15 +132,37 @@ GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" YTINDE
   provoz nebo více zapisujících procesů; stejné API i hledání.
 * Klíče jdou výhradně přes Secret Manager / env (`GEMINI_API_KEY`); kanál přes `YTINDEX_CHANNEL` (bez `ytindex.toml`).
 
+## Kvalita hledání (měřeno na 10 videích)
+
+Eval: 30 náhodných úseků přepisu → Gemini k nim vygeneroval otázku *jinými slovy* (parafráze) a zvlášť dotaz
+ze dvou vzácných slov úseku (klíčová slova). Měří se, zda je správné video první / v top 5 a zda je správné
+místo (±150 s) první / v top 5. Skript: `scratchpad/eval.py` v session, data v `tests/` nejsou (potřebuje API klíč).
+
+| dotazy | režim | video@1 | video@5 | místo@1 | místo@5 |
+|---|---|---|---|---|---|
+| parafráze | fts | 0.23 | 0.63 | 0.07 | 0.17 |
+| parafráze | vector | 0.90 | 1.00 | 0.80 | 0.90 |
+| parafráze | **hybrid** | **0.90** | **1.00** | **0.80** | **0.90** |
+| klíčová slova | fts | 1.00 | 1.00 | 1.00 | 1.00 |
+| klíčová slova | vector | 0.60 | 0.87 | 0.50 | 0.73 |
+| klíčová slova | **hybrid** | **1.00** | **1.00** | **1.00** | **1.00** |
+
+Hybrid tedy drží maximum obou režimů. Klíčové nastavení: dokumenty `RETRIEVAL_DOCUMENT`, dotazy `RETRIEVAL_QUERY`,
+normalizované vektory, cosine; stopslova se z fulltextu vyhazují; ve fúzi (RRF) má fulltext se všemi slovy
+váhu 1,5, vektory 1,0 a OR‑fallback se v hybridu nepoužívá. Gemini podobnosti jsou „ploché“
+(relevantní ≈ 0,70–0,75, nesmysl ≈ 0,60–0,65), proto se počet shod počítá jen z chunků do 0,03 od nejlepšího.
+Stejný eval s 256‑d vektory: parafráze 0,83 / 0,93 (místo 0,77 / 0,83), index 2× menší.
+
 ## MCP server (hledání z Claude / jiných AI)
 
-Nástroje: `search_videos`, `get_transcript`, `list_videos`, `channel_info`.
+Nástroje: `search_videos`, `get_transcript`, `list_videos`, `channel_info`. Endpoint: `https://<url>/mcp` (Streamable HTTP, bez autentizace).
 
 | Kde | Jak |
 |---|---|
-| claude.ai / Claude Desktop | Settings → Connectors → Add custom connector → `https://<cloud-run-url>/mcp` |
-| Claude Code (vzdáleně) | `claude mcp add --transport http ytindex https://<cloud-run-url>/mcp` |
-| Claude Code / Desktop (lokálně, stdio) | `claude mcp add ytindex -- ytindex mcp` (spouštět v adresáři s `ytindex.toml`) |
+| claude.ai (web) | Settings → Connectors → **Add custom connector** → Name `ytindex`, URL `https://<cloud-run-url>/mcp` → Add. Pak v chatu zapnout v menu nástrojů. |
+| Claude Desktop | stejné nastavení Connectors (sdílené s claude.ai), nebo lokální stdio (níže) |
+| Claude Code (tento repozitář) | hotovo v `.mcp.json` (project scope) – po otevření repa se zeptá na schválení; jinde `claude mcp add --transport http ytindex https://<cloud-run-url>/mcp` |
+| Lokálně (stdio) | `claude mcp add ytindex -- ytindex mcp` (v adresáři s `ytindex.toml`) |
 
 ## Kde to provozovat (doporučení)
 

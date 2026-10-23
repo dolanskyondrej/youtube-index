@@ -12,7 +12,7 @@ REGION="${REGION:-europe-west1}"
 SERVICE="${SERVICE:-ytindex}"
 BUCKET="${BUCKET:-${PROJECT_ID}-ytindex}"
 CHANNEL="${CHANNEL:?Nastav CHANNEL (handle/ID/URL kanálu)}"
-GEMINI_API_KEY="${GEMINI_API_KEY:?Nastav GEMINI_API_KEY}"
+GEMINI_API_KEY="${GEMINI_API_KEY:-}"           # povinný jen při prvním nasazení; ROTATE_GEMINI_KEY=1 uloží novou verzi
 YOUTUBE_API_KEY="${YOUTUBE_API_KEY:-}"
 YTINDEX_LIMIT="${YTINDEX_LIMIT:-}"          # např. 10 = indexovat jen prvních N videí (test)
 MEMORY="${MEMORY:-1Gi}"                      # celý kanál (~100k chunků s vektory) → 2Gi
@@ -36,8 +36,16 @@ gcloud artifacts repositories describe "$REPO" --location "$REGION" >/dev/null 2
   gcloud artifacts repositories create "$REPO" --repository-format docker --location "$REGION" --quiet
 
 echo "▶ Secret s Gemini klíčem"
-printf '%s' "$GEMINI_API_KEY" | (gcloud secrets create ytindex-gemini-key --data-file=- --quiet 2>/dev/null || \
-  gcloud secrets versions add ytindex-gemini-key --data-file=- --quiet)
+if ! gcloud secrets describe ytindex-gemini-key >/dev/null 2>&1 && [ -z "$GEMINI_API_KEY" ]; then
+  echo "Chybí GEMINI_API_KEY (secret ještě neexistuje)." >&2; exit 2
+fi
+if gcloud secrets describe ytindex-gemini-key >/dev/null 2>&1; then
+  if [ "${ROTATE_GEMINI_KEY:-0}" = "1" ]; then
+    printf '%s' "$GEMINI_API_KEY" | gcloud secrets versions add ytindex-gemini-key --data-file=- --quiet
+  fi
+else
+  printf '%s' "$GEMINI_API_KEY" | gcloud secrets create ytindex-gemini-key --data-file=- --quiet
+fi
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')"
 SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 gcloud secrets add-iam-policy-binding ytindex-gemini-key --member "serviceAccount:${SA}" \
