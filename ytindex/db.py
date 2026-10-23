@@ -250,6 +250,13 @@ class Database:
             "SELECT idx, start, duration, text FROM segments WHERE video_id=? ORDER BY idx", (video_id,)
         ).fetchall()
 
+    def get_segments_range(self, video_id: str, start: float, end: float) -> list[sqlite3.Row]:
+        """Segmenty, které zasahují do intervalu <start, end> (pro rozšíření kontextu kolem shody)."""
+        return self.conn.execute(
+            "SELECT idx, start, duration, text FROM segments WHERE video_id=? AND start + duration >= ? AND start <= ? "
+            "ORDER BY idx", (video_id, start, end),
+        ).fetchall()
+
     # ---------- embeddings ----------
     def pending_embeddings(self, limit: int = 100) -> list[sqlite3.Row]:
         return self.conn.execute(

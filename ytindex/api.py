@@ -16,6 +16,7 @@ from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
 from .db import open_database
+from .research import answer as rag_answer, gather_context
 from .search import hit_to_dict, search
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,33 @@ class SearchOut(BaseModel):
     mode: str
     total: int
     results: list[VideoHitOut]
+
+
+class PassageOut(BaseModel):
+    n: int = Field(description="Číslo citace")
+    video_id: str
+    title: str
+    published_at: str | None
+    start: float
+    end: float
+    timestamp: str
+    url: str = Field(description="Odkaz na video v čase začátku pasáže")
+    text: str = Field(description="Souvislý text pasáže (shoda + okolní řeč)")
+    score: float
+
+
+class ContextOut(BaseModel):
+    question: str
+    indexed_videos: int
+    passages: list[PassageOut]
+
+
+class AskOut(BaseModel):
+    question: str
+    answer: str | None
+    model: str | None = None
+    error: str | None = None
+    citations: list[PassageOut]
 
 
 class VideoOut(BaseModel):
@@ -181,6 +209,23 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
         hits = search(db, q, limit=limit, mode=mode, embed_query=embed_query_fn(), per_video_matches=per_video)
         effective = mode if (mode == "fts" or embed_query_fn() is not None) else "fts"
         return {"query": q, "mode": effective, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
+
+    @app.get("/api/context", response_model=ContextOut)
+    def api_context(q: str = Query(..., min_length=1, max_length=500, description="Otázka nebo téma"),
+                    max_passages: int = Query(8, ge=1, le=20), context_seconds: int = Query(90, ge=20, le=600),
+                    per_video: int = Query(3, ge=1, le=10)):
+        """Rešerše: souvislé pasáže k tématu (pro psaní, RAG v jiném frontendu)."""
+        ps = gather_context(db, q, embed_query=embed_query_fn(), max_passages=max_passages,
+                            context_s=float(context_seconds), per_video=per_video)
+        return {"question": q, "indexed_videos": db.stats()["videos_by_status"].get("done", 0),
+                "passages": [p.__dict__ for p in ps]}
+
+    @app.get("/api/ask", response_model=AskOut)
+    def api_ask(q: str = Query(..., min_length=1, max_length=500), max_passages: int = Query(8, ge=1, le=20),
+                context_seconds: int = Query(90, ge=20, le=600)):
+        """Odpověď Gemini sestavená jen z přepisů, s citacemi [n] a odkazy na čas."""
+        return rag_answer(cfg, db, q, embed_query=embed_query_fn(), max_passages=max_passages,
+                          context_s=float(context_seconds))
 
     @app.get("/api/videos", response_model=VideoListOut)
     def videos(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=200),

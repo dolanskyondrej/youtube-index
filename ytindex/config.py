@@ -32,6 +32,7 @@ class TranscriptConfig:
 @dataclass
 class GeminiConfig:
     model: str = "gemini-3.5-flash-lite"      # model pro transkripci videí bez titulků
+    answer_model: str = "gemini-3.5-flash"     # model pro odpovědi s citacemi (/api/ask, MCP ask_channel)
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
     transcribe_window_s: int = 600            # délka úseku videa pro jednu transkripční žádost (10 min ≈ 19k tokenů, ~13 s)

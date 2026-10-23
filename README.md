@@ -81,6 +81,8 @@ Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat 
 | Endpoint | Popis |
 |---|---|
 | `/api/search?q=…&limit=20&mode=hybrid\|fts\|vector&per_video=3` | hlavní hledání; výsledky seskupené po videích |
+| `/api/context?q=…&max_passages=8&context_seconds=90` | rešerše pro psaní: souvislé pasáže k tématu (shoda + okolní řeč, střídavě z videí), s čísly citací a odkazy na čas |
+| `/api/ask?q=…` | odpověď Gemini sestavená jen z přepisů, s citacemi [n] a seznamem pasáží |
 | `/api/videos?page=1&per_page=50&status=done` | seznam videí kanálu |
 | `/api/videos/{id}` | detail videa včetně celého transkriptu (segmenty s časy a odkazy) |
 | `/api/channel` | název, URL a statistiky indexu |
@@ -162,7 +164,18 @@ Stejný eval s 256‑d vektory: parafráze 0,83 / 0,93 (místo 0,77 / 0,83), ind
 
 ## MCP server (hledání z Claude / jiných AI)
 
-Nástroje: `search_videos`, `get_transcript`, `list_videos`, `channel_info`. Endpoint: `https://<url>/mcp` (Streamable HTTP, bez autentizace).
+Nástroje a endpoint `https://<url>/mcp` (Streamable HTTP, bez autentizace):
+
+| nástroj | k čemu |
+|---|---|
+| `search_videos` | klasické hledání: videa, úryvky se shodou, odkazy s časem |
+| `research_topic` | **pro psaní**: k otázce vrátí delší souvislé pasáže toho, co k tématu zaznělo (±45 s kolem shody, střídavě z videí); Claude z nich syntetizuje a cituje s odkazy |
+| `ask_channel` | hotová odpověď Gemini jen z přepisů, s citacemi [n] a pasážemi |
+| `get_transcript` | celý přepis videa nebo úsek `start_s`–`end_s` |
+| `list_videos`, `channel_info` | přehled kanálu a stav indexu |
+
+Tip pro rešerši: otázky typu „Co si Urza myslí o X?“ se před hledáním ořežou na téma X (jméno mluvčího a tázací
+rámec jinak táhnou k úvodům videí). Mluvčí v přepisech není rozlišen, ve studiu bývají hosté.
 
 | Kde | Jak |
 |---|---|

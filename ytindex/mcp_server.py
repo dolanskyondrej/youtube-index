@@ -16,8 +16,11 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore
     TransportSecuritySettings = None  # type: ignore
 
+from dataclasses import asdict
+
 from .chunking import format_timestamp
 from .config import Config, load_config
+from .research import answer as rag_answer, gather_context
 from .search import hit_to_dict, search
 
 
@@ -31,9 +34,11 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
         "ytindex",
         instructions=(
             f"Vyhledávání v transkriptech všech videí YouTube kanálu „{name}“. "
-            "Použij search_videos pro dotaz uživatele (vrací videa, úryvky se shodou a odkazy s časem), "
-            "get_transcript pro celý přepis konkrétního videa a list_videos pro přehled kanálu. "
-            "Při odpovědi uváděj odkazy na čas ve videu (pole url u shody)."
+            "search_videos = klasické hledání (videa, úryvky se shodou, odkazy s časem). "
+            "research_topic = pro psaní a rešerši: k otázce vrátí delší souvislé pasáže toho, co k tématu zaznělo; "
+            "z nich sestav odpověď, cituj doslovně a vždy uváděj odkaz s časem (pole url). "
+            "ask_channel = hotová odpověď s citacemi sestavená Gemini (když nechceš syntetizovat sám). "
+            "get_transcript = celý přepis videa nebo jeho úsek, list_videos = přehled kanálu."
         ),
     )
 
@@ -56,6 +61,28 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
         hits = search(db, query, limit=max(1, min(limit, 50)), mode=mode, embed_query=embed_fn(),
                       per_video_matches=max(1, min(per_video, 10)))
         return {"query": query, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
+
+    @mcp.tool()
+    def research_topic(question: str, max_passages: int = 8, context_seconds: int = 90, per_video: int = 3) -> dict:
+        """Rešerše pro psaní: k otázce/tématu vrátí nejrelevantnější SOUVISLÉ pasáže z přepisů (každá shoda rozšířená
+        o okolní řeč, výchozí ±45 s), střídavě z různých videí, s číslem citace, názvem videa, časem a odkazem.
+        Použij, když chceš vědět, co k tématu zaznělo, jak dotyčný uvažuje a formuluje – a pak to citovat.
+        Mluvčí není rozlišen (ve studiu bývají hosté), posuzuj z kontextu.
+        """
+        ps = gather_context(db, question, embed_query=embed_fn(), max_passages=max(1, min(max_passages, 20)),
+                            context_s=float(max(20, min(context_seconds, 600))), per_video=max(1, min(per_video, 10)))
+        stats = db.stats()
+        return {"question": question, "indexed_videos": stats["videos_by_status"].get("done", 0),
+                "passages": [asdict(p) for p in ps],
+                "hint": "Cituj doslovně z pole text a ke každé citaci uveď url (odkaz na čas ve videu)."}
+
+    @mcp.tool()
+    def ask_channel(question: str, max_passages: int = 8, context_seconds: int = 90) -> dict:
+        """Odpověď na otázku sestavená Gemini výhradně z přepisů (RAG) s citacemi [n]; pole citations obsahuje
+        pasáže s odkazy na čas. Hodí se pro rychlé „co k tomu Urza říkal“; pro vlastní syntézu použij research_topic.
+        """
+        return rag_answer(cfg, db, question, embed_query=embed_fn(), max_passages=max(1, min(max_passages, 20)),
+                          context_s=float(max(20, min(context_seconds, 600))))
 
     @mcp.tool()
     def get_transcript(video_id: str, start_s: float | None = None, end_s: float | None = None) -> dict:

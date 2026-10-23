@@ -11,7 +11,10 @@ from ytindex.mcp_server import build_mcp
 async def test_mcp_tools_direct(cfg, db):
     mcp = build_mcp(cfg, db)
     tools = {t.name for t in await mcp.list_tools()}
-    assert {"search_videos", "get_transcript", "list_videos", "channel_info"} <= tools
+    assert {"search_videos", "research_topic", "ask_channel", "get_transcript", "list_videos", "channel_info"} <= tools
+    rt = await mcp.call_tool("research_topic", {"question": "bitcoin", "max_passages": 3})
+    rt = rt.structured_content or json.loads(rt.content[0].text)
+    assert rt["passages"] and rt["passages"][0]["url"].startswith("https://www.youtube.com/watch?v=")
     res = await mcp.call_tool("search_videos", {"query": "bitcoin", "limit": 5})
     payload = res.structured_content or json.loads(res.content[0].text)
     assert payload["total"] == 2 and "<mark>" in payload["results"][0]["match"]["highlighted"]

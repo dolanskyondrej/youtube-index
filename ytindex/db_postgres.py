@@ -230,6 +230,10 @@ class PostgresDatabase:
     def get_segments(self, video_id: str):
         return self._all("SELECT idx, start, duration, text FROM segments WHERE video_id=%s ORDER BY idx", (video_id,))
 
+    def get_segments_range(self, video_id: str, start: float, end: float):
+        return self._all("SELECT idx, start, duration, text FROM segments WHERE video_id=%s AND start + duration >= %s "
+                         "AND start <= %s ORDER BY idx", (video_id, start, end))
+
     # ---------- embeddings ----------
     def pending_embeddings(self, limit: int = 100):
         return self._all("SELECT id, video_id, text FROM chunks WHERE embedding IS NULL ORDER BY id LIMIT %s", (limit,))
