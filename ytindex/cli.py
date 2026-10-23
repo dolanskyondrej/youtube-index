@@ -84,7 +84,8 @@ def _ensure_channel(cfg: Config, db) -> None:
 
 
 def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, skip_listing: bool = False,
-               providers: list[str] | None = None, shard: tuple[int, int] | None = None, embed: bool = True) -> int:
+               providers: list[str] | None = None, shard: tuple[int, int] | None = None, embed: bool = True,
+               ids: list[str] | None = None) -> int:
     from .chunking import chunk_segments, merge_segments
     from .transcripts import get_transcript
     from .youtube import enrich_with_data_api, list_channel_videos
@@ -111,6 +112,9 @@ def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, s
     todo = []
     for st in statuses:
         todo += db.list_videos(status=st, limit=10**6, order="position ASC")
+    if ids:
+        wanted = set(ids)
+        todo = [v for v in todo if v["id"] in wanted]
     if limit:
         todo = todo[:limit]
     if shard:
@@ -161,7 +165,7 @@ def cmd_ingest(args) -> int:
     db.upsert_channel(cfg.channel.id, cfg.channel.name, cfg.channel.url, cfg.channel.input)
     providers = args.providers.split(",") if args.providers else None
     rc = run_ingest(cfg, db, limit=args.limit, retry=args.retry, skip_listing=args.skip_listing,
-                    providers=providers, embed=not args.no_embed)
+                    providers=providers, embed=not args.no_embed, ids=args.ids.split(",") if args.ids else None)
     db.close()
     return rc
 
@@ -330,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--skip-listing", action="store_true", help="neaktualizovat seznam videí")
     s.add_argument("--providers", help="pořadí providerů, např. captions,gemini")
     s.add_argument("--no-embed", action="store_true", help="nepočítat embeddingy")
+    s.add_argument("--ids", help="zpracovat jen tato video ID (oddělená čárkou)")
     s.set_defaults(fn=cmd_ingest)
 
     s = sub.add_parser("embed", help="dopočítá chybějící embeddingy (Gemini)")
