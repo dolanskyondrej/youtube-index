@@ -170,11 +170,24 @@ def cmd_ingest(args) -> int:
     return rc
 
 
+def _gcs_pull(cfg: Config) -> str | None:
+    """Pokud je YTINDEX_GCS_DB, stáhne SQLite index z Cloud Storage do cfg.db_path a vrátí gs URL."""
+    gs = os.environ.get("YTINDEX_GCS_DB")
+    if not gs:
+        return None
+    from .gcs import download
+
+    cfg.db_path = os.environ.get("YTINDEX_LOCAL_DB", "/tmp/ytindex/index.sqlite")
+    download(gs, cfg.db_path)
+    return gs
+
+
 def cmd_cloud_ingest(args) -> int:
-    """Cloud Run Job: konfigurace z env (YTINDEX_CHANNEL, DATABASE_URL, GEMINI_API_KEY), provider gemini."""
+    """Cloud Run Job: konfigurace z env (YTINDEX_CHANNEL, YTINDEX_GCS_DB nebo DATABASE_URL, GEMINI_API_KEY)."""
     from .db import open_database
 
     cfg = load_config()
+    gs = _gcs_pull(cfg)
     db = open_database(cfg)
     _ensure_channel(cfg, db)
     providers = (args.providers or os.environ.get("YTINDEX_PROVIDERS") or "gemini").split(",")
@@ -185,9 +198,15 @@ def cmd_cloud_ingest(args) -> int:
     elif os.environ.get("CLOUD_RUN_TASK_COUNT", "1") != "1":
         shard = (int(os.environ["CLOUD_RUN_TASK_INDEX"]), int(os.environ["CLOUD_RUN_TASK_COUNT"]))
     skip_listing = shard is not None and shard[0] != 0 and not args.limit  # seznam aktualizuje jen task 0
-    rc = run_ingest(cfg, db, limit=args.limit, retry=args.retry, skip_listing=skip_listing,
+    limit = args.limit if args.limit is not None else (int(os.environ["YTINDEX_LIMIT"]) if os.environ.get("YTINDEX_LIMIT") else None)
+    rc = run_ingest(cfg, db, limit=limit, retry=args.retry, skip_listing=skip_listing,
                     providers=providers, shard=shard, embed=not args.no_embed)
     db.close()
+    if gs:
+        from .gcs import upload
+
+        upload(cfg.db_path, gs)
+        print(f"✔ Index nahrán do {gs}")
     return rc
 
 
@@ -197,6 +216,7 @@ def cmd_cloud_serve(args) -> int:
     from .db import open_database
 
     cfg = load_config()
+    _gcs_pull(cfg)
     db = open_database(cfg)
     _ensure_channel(cfg, db)
     uvicorn.run(create_app(cfg, db), host="0.0.0.0", port=int(os.environ.get("PORT", args.port)), log_level="info")
