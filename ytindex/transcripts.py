@@ -167,10 +167,34 @@ def fetch_ytdlp_subs(video_id: str, cfg: Config) -> TranscriptResult | None:
 
 _TRANSCRIBE_PROMPT = (
     "Přepiš doslovně veškerou mluvenou řeč v tomto úseku videa v původním jazyce. "
-    "Rozděl přepis na krátké úseky po cca 10–20 sekundách. Pro každý úsek uveď čas začátku "
-    "v sekundách od začátku tohoto úseku videa (pole start) a text (pole text). "
+    "Rozděl přepis na krátké úseky po cca 10–20 sekundách. Pro každý úsek uveď časovou značku začátku "
+    "ve formátu MM:SS nebo H:MM:SS (pole start) a text (pole text). "
     "Vynech hudbu a zvukové efekty. Nic nepřidávej ani neshrnuj."
 )
+
+# Pozn.: Gemini má správné časové značky jen ve formátu MM:SS (nativní formát z tréninku);
+# číselné sekundy driftují (~1,6×). Ověřeno na gemini-3.5-flash-lite.
+
+
+def parse_timestamp(value) -> float | None:
+    """'1:02:03' / '02:03' / '63' → sekundy."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    try:
+        nums = [float(p.replace(",", ".")) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 1:
+        return nums[0]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    return nums[-3] * 3600 + nums[-2] * 60 + nums[-1]
 
 
 def fetch_gemini(video_id: str, cfg: Config, duration_s: int | None) -> TranscriptResult | None:
@@ -192,7 +216,7 @@ def fetch_gemini(video_id: str, cfg: Config, duration_s: int | None) -> Transcri
         type=types.Type.ARRAY,
         items=types.Schema(
             type=types.Type.OBJECT,
-            properties={"start": types.Schema(type=types.Type.NUMBER),
+            properties={"start": types.Schema(type=types.Type.STRING, description="čas začátku MM:SS nebo H:MM:SS"),
                         "text": types.Schema(type=types.Type.STRING)},
             required=["start", "text"],
         ),
@@ -216,14 +240,19 @@ def fetch_gemini(video_id: str, cfg: Config, duration_s: int | None) -> Transcri
             items = json.loads(resp.text or "[]")
         except json.JSONDecodeError:
             items = []
-        # heuristika: model vrací časy relativně k oknu; pokud jsou zjevně absolutní, nepřičítat offset
-        rel = all(float(it.get("start", 0)) <= (end - offset) + 5 for it in items) if items else True
-        for k, it in enumerate(items):
-            start = float(it.get("start", 0)) + (offset if rel else 0)
-            nxt = float(items[k + 1].get("start", start + 10)) + (offset if rel else 0) if k + 1 < len(items) else start + 10
-            text = str(it.get("text", "")).strip()
-            if text:
-                segments.append(Segment(start, max(nxt - start, 1.0), text))
+        parsed = [(parse_timestamp(it.get("start")), str(it.get("text", "")).strip()) for it in items]
+        parsed = [(t, x) for t, x in parsed if t is not None and x]
+        # model vrací časy absolutní (od začátku videa); pokud by byly relativní k oknu, přičteme offset
+        rel = offset > 0 and all(t <= (end - offset) + 5 for t, _ in parsed)
+        base = offset if rel else 0
+        prev = None
+        for k, (t, text) in enumerate(parsed):
+            start = t + base
+            if prev is not None and start < prev:   # monotónnost (model občas vrátí zpětný skok)
+                start = prev
+            nxt = parsed[k + 1][0] + base if k + 1 < len(parsed) else start + 10
+            segments.append(Segment(start, max(nxt - start, 1.0), text))
+            prev = start
         offset = end
     return TranscriptResult(segments, "gemini", None) if segments else None
 

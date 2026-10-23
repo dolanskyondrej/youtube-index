@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .chunking import Chunk, Segment
+from .query import build_fts_query
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS channels (
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS videos (
     transcript_source TEXT,                             -- captions | ytdlp | gemini
     transcript_lang TEXT,
     transcript_error TEXT,
+    position INTEGER,
     updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_videos_channel ON videos(channel_id);
@@ -110,6 +112,9 @@ class Database:
 
     def _init_schema(self) -> None:
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(videos)")}
+        if "position" not in cols:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN position INTEGER")
         if self.vec_available:
             stored = self.get_meta("embedding_dim")
             if stored and int(stored) != self.embedding_dim:
@@ -160,10 +165,11 @@ class Database:
     def upsert_video(self, v: dict) -> None:
         """v: id, channel_id, title, description, published_at, duration_s, view_count, thumbnail_url"""
         self.conn.execute(
-            """INSERT INTO videos(id, channel_id, title, description, published_at, duration_s, view_count, thumbnail_url)
-               VALUES (:id, :channel_id, :title, :description, :published_at, :duration_s, :view_count, :thumbnail_url)
+            """INSERT INTO videos(id, channel_id, title, description, published_at, duration_s, view_count, thumbnail_url, position)
+               VALUES (:id, :channel_id, :title, :description, :published_at, :duration_s, :view_count, :thumbnail_url, :position)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title,
+                 position=COALESCE(excluded.position, videos.position),
                  description=COALESCE(NULLIF(excluded.description,''), videos.description),
                  published_at=COALESCE(excluded.published_at, videos.published_at),
                  duration_s=COALESCE(excluded.duration_s, videos.duration_s),
@@ -171,7 +177,7 @@ class Database:
                  thumbnail_url=COALESCE(excluded.thumbnail_url, videos.thumbnail_url),
                  updated_at=datetime('now')""",
             {"description": "", "published_at": None, "duration_s": None, "view_count": None,
-             "thumbnail_url": None, **v},
+             "thumbnail_url": None, "position": None, **v},
         )
 
     def get_video(self, video_id: str) -> sqlite3.Row | None:
@@ -184,8 +190,10 @@ class Database:
             where.append("channel_id=?"); params.append(channel_id)
         if status:
             where.append("transcript_status=?"); params.append(status)
-        allowed = {"published_at DESC", "published_at ASC", "title ASC", "duration_s DESC", "view_count DESC"}
+        allowed = {"published_at DESC", "published_at ASC", "title ASC", "duration_s DESC", "view_count DESC", "position ASC"}
         order = order if order in allowed else "published_at DESC"
+        if order == "published_at DESC":
+            order = "published_at DESC, position ASC"
         sql = "SELECT * FROM videos" + (" WHERE " + " AND ".join(where) if where else "")
         sql += f" ORDER BY {order} NULLS LAST LIMIT ? OFFSET ?"
         return self.conn.execute(sql, (*params, limit, offset)).fetchall()
@@ -256,6 +264,56 @@ class Database:
         row = self.conn.execute("SELECT SUM(embedded), COUNT(*) FROM chunks").fetchone()
         return int(row[0] or 0), int(row[1] or 0)
 
+    # ---------- vyhledávací primitiva (stejné rozhraní má PostgresDatabase) ----------
+    backend = "sqlite"
+
+    def fts_hits(self, q: str, mode: str, limit: int) -> list[tuple[int, float]]:
+        """[(chunk_id, rank)] seřazené od nejlepšího. mode: and | or."""
+        fts_query = build_fts_query(q, mode)
+        if not fts_query:
+            return []
+        try:
+            rows = self.conn.execute(
+                "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY r LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [(r["rowid"], r["r"]) for r in rows]
+
+    def vec_hits(self, qvec: list[float], limit: int) -> list[tuple[int, float]]:
+        """[(chunk_id, cosine_distance)] seřazené od nejbližšího."""
+        if not self.vec_available:
+            return []
+        rows = self.conn.execute(
+            "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (serialize_f32(qvec), limit),
+        ).fetchall()
+        return [(r["chunk_id"], r["distance"]) for r in rows]
+
+    def snippet(self, chunk_id: int, q: str, mode: str) -> str | None:
+        """Úryvek se <mark> značkami, nebo None pokud chunk dotazu lexikálně neodpovídá."""
+        fts_query = build_fts_query(q, mode)
+        if not fts_query:
+            return None
+        try:
+            row = self.conn.execute(
+                "SELECT snippet(chunks_fts, 0, '<mark>', '</mark>', '…', 40) AS s FROM chunks_fts "
+                "WHERE rowid = ? AND chunks_fts MATCH ?", (chunk_id, fts_query),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row["s"] if row and row["s"] else None
+
+    def fetch_chunks(self, ids: list[int]) -> list[dict]:
+        if not ids:
+            return []
+        rows = self.conn.execute(
+            f"SELECT c.id, c.video_id, c.start, c.end, c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url "
+            f"FROM chunks c JOIN videos v ON v.id = c.video_id WHERE c.id IN ({','.join('?' * len(ids))})", ids,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ---------- stats ----------
     def stats(self) -> dict:
         st = {r["transcript_status"]: r["c"] for r in self.conn.execute(
@@ -263,6 +321,7 @@ class Database:
         embedded, chunks = self.count_embedded()
         hours = self.conn.execute("SELECT COALESCE(SUM(duration_s),0)/3600.0 FROM videos").fetchone()[0]
         return {
+            "backend": self.backend,
             "videos": self.count_videos(),
             "videos_by_status": st,
             "chunks": chunks,
@@ -270,3 +329,13 @@ class Database:
             "total_hours": round(hours, 1),
             "vector_search": self.vec_available and embedded > 0,
         }
+
+
+def open_database(cfg, url: str | None = None):
+    """Factory: DATABASE_URL (postgresql://…) → Cloud SQL / Postgres + pgvector, jinak lokální SQLite."""
+    import os
+    url = url or os.environ.get("DATABASE_URL", "")
+    if url.startswith(("postgres://", "postgresql://")):
+        from .db_postgres import PostgresDatabase
+        return PostgresDatabase(url, cfg.gemini.embedding_dim)
+    return Database(cfg.db_path, cfg.gemini.embedding_dim)

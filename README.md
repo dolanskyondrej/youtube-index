@@ -32,10 +32,12 @@ ytindex init  ──►  ytindex ingest  ──►  ytindex embed (volitelné)  
   Umí ale přijmout **veřejnou YouTube URL jako vstup** (`file_data.file_uri`) a video na své straně zpracovat,
   takže ho necháme **přepsat řeč s časovými značkami**. To je to, co dělá NotebookLM (interně používá stejné
   video understanding); navenek to NotebookLM neexportuje a nemá API.
-- Limity: free tier **8 h YouTube videa / den**, placený bez limitu délky; jen veřejná videa; cena cca
-  **100 tokenů/s videa** (při nízkém rozlišení; audio 32 tok/s). Pro 1 500 h je to ~540 M vstupních tokenů ≈
-  **$55 na Gemini 2.5 Flash‑Lite** (+ výstup ~$10). Při `transcribe_fps = 0.1` (zajímá nás audio) ještě méně.
-  Dlouhá videa posíláme po oknech (`transcribe_window_s`, výchozí 30 min) přes `video_metadata.start/end_offset`.
+- Limity: free tier **8 h YouTube videa / den**, placený bez limitu délky; jen veřejná videa. Ověřeno
+  na `gemini-3.5-flash-lite`: 10 min videa při `fps = 0.1` ≈ **19 k vstupních tokenů, ~13 s**, tj. ~115 k tokenů/h
+  ≈ 0,05 USD/h videa → **~75 USD za celý kanál (1 500 h)**. Videa posíláme po oknech (`transcribe_window_s`,
+  výchozí 10 min) přes `video_metadata.start/end_offset`.
+- **Časové značky chtějte ve formátu `MM:SS`** – v číselných sekundách model driftuje (~1,6×), v `MM:SS` sedí
+  (ověřeno na okně 20:00–30:00). Model vrací časy absolutní od začátku videa i při výřezu.
 - Proto je Gemini až **třetí v pořadí**: titulky z YouTube jsou zdarma, přesné a má je naprostá většina videí
   (auto‑captions cs). Gemini nastupuje jen pro videa bez titulků (`providers = ["captions","ytdlp","gemini"]`).
 
@@ -107,6 +109,35 @@ Příklad odpovědi `/api/search?q=bitcoin`:
 `highlighted` obsahuje **pouze** značky `<mark>`; frontend zbytek escapuje (viz `ytindex/web/index.html`).
 Víc kanálů = víc instancí (každý kanál má vlastní `ytindex.toml` + DB), API je na kanálu nezávislé.
 
+## Google Cloud (produkční nasazení)
+
+Kompletní návod a architektura v [deploy/README.md](deploy/README.md). Zkráceně:
+
+```bash
+gcloud auth login && gcloud config set project youtube-index-512512
+GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" ./deploy/deploy.sh
+gcloud run jobs execute ytindex-ingest --region europe-west1 --args cloud-ingest,--limit,10 --wait   # test 10 videí
+```
+
+* **Cloud Run service** `ytindex cloud-serve`: web + REST API + MCP (`/mcp`) v jednom kontejneru.
+* **Cloud Run Job** `ytindex cloud-ingest`: indexace přes Gemini (z cloudu jsou YouTube titulky blokované), resumable,
+  paralelizovatelná přes `--tasks N` (shardování podle `CLOUD_RUN_TASK_INDEX`).
+* **Cloud SQL PostgreSQL 16 + pgvector + unaccent**: nastavením `DATABASE_URL=postgresql://…` se místo SQLite použije
+  backend `ytindex/db_postgres.py` (tsvector s konfigurací `cs_simple` = fulltext bez diakritiky, HNSW index pro
+  cosine vzdálenost). Stejné API, stejné hledání.
+* Klíče jdou výhradně přes Secret Manager / env (`GEMINI_API_KEY`, `DATABASE_URL`); konfigurace kanálu přes
+  `YTINDEX_CHANNEL` (bez `ytindex.toml`).
+
+## MCP server (hledání z Claude / jiných AI)
+
+Nástroje: `search_videos`, `get_transcript`, `list_videos`, `channel_info`.
+
+| Kde | Jak |
+|---|---|
+| claude.ai / Claude Desktop | Settings → Connectors → Add custom connector → `https://<cloud-run-url>/mcp` |
+| Claude Code (vzdáleně) | `claude mcp add --transport http ytindex https://<cloud-run-url>/mcp` |
+| Claude Code / Desktop (lokálně, stdio) | `claude mcp add ytindex -- ytindex mcp` (spouštět v adresáři s `ytindex.toml`) |
+
 ## Kde to provozovat (doporučení)
 
 - **Web + API:** jeden malý VPS/kontejner stačí (DB je SQLite soubor, dotaz trvá jednotky až desítky ms).
@@ -127,12 +158,14 @@ Vytvoří ji `ytindex init`. Klíčové volby: `transcripts.languages` (priorita
 ## Vývoj
 
 ```bash
-pytest                 # chunking, FTS/hybridní hledání (s falešným embedderem), API, parsery titulků
+pytest                 # chunking, FTS/hybridní hledání (s falešným embedderem), API, MCP, parsery titulků
+TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/ytindex pytest tests/test_postgres.py   # Postgres backend
 uvicorn ytindex.api:app --factory --reload
 ```
 
 Struktura: `ytindex/youtube.py` (kanál + seznam videí), `transcripts.py` (providery), `chunking.py`, `db.py`
-(schéma, FTS5, sqlite-vec), `embeddings.py`, `search.py` (RRF), `api.py`, `cli.py`, `web/index.html`.
+(SQLite: FTS5 + sqlite-vec), `db_postgres.py` (Postgres: tsvector + pgvector), `query.py` (převod dotazu),
+`embeddings.py`, `search.py` (RRF), `api.py`, `mcp_server.py`, `cli.py`, `web/index.html`, `deploy/`.
 
 ## Roadmap / nápady
 

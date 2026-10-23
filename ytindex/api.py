@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from functools import lru_cache
 from pathlib import Path
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
-from .db import Database
+from .db import open_database
 from .search import hit_to_dict, search
 
 log = logging.getLogger(__name__)
@@ -103,15 +104,28 @@ def _video_out(r) -> dict:
 
 def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI:
     cfg = cfg or load_config()
-    db = db or Database(cfg.db_path, cfg.gemini.embedding_dim)
+    db = db or open_database(cfg)
+
+    from .mcp_server import build_mcp, http_app
+    mcp = build_mcp(cfg, db)
+    mcp_app = http_app(mcp)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with mcp.session_manager.run():  # lifespan sub-aplikace FastAPI nespouští, proto ručně
+            yield
 
     app = FastAPI(
         title="ytindex API",
         version=__version__,
         description="Vyhledávání v transkriptech všech videí YouTube kanálu. "
-                    "Hybridní (fulltext + sémantické) hledání, výsledky po videích s nejlepší shodou a odkazem na čas.",
+                    "Hybridní (fulltext + sémantické) hledání, výsledky po videích s nejlepší shodou a odkazem na čas. "
+                    "MCP server (Streamable HTTP) běží na /mcp.",
+        lifespan=lifespan,
     )
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+    app.mount("/mcp", mcp_app)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"],
+                       allow_headers=["*"], expose_headers=["Mcp-Session-Id"])
 
     @lru_cache(maxsize=1)
     def embedder():

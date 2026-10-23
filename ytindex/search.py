@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass, asdict
 
 from .chunking import format_timestamp
-from .db import Database, serialize_f32
+from .query import build_fts_query  # noqa: F401  (re-export pro zpětnou kompatibilitu testů)
 
 RRF_K = 60
 # vektorové kandidáty ořízneme na ty, které jsou "blízko" nejlepšího zásahu – k-NN vrací vždy k výsledků,
@@ -20,28 +20,6 @@ _WORD = re.compile(r"[\w]+", re.UNICODE)
 
 def strip_diacritics(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
-
-def build_fts_query(q: str, mode: str = "and") -> str:
-    """Z uživatelského dotazu vyrobí bezpečný FTS5 dotaz.
-
-    - fráze v uvozovkách zůstávají frází
-    - jednotlivá slova dostanou prefix (*), aby 'svobod' našlo 'svoboda' i 'svobodný' (čeština skloňuje)
-    """
-    phrases = re.findall(r'"([^"]+)"', q)
-    rest = re.sub(r'"[^"]*"', " ", q)
-    terms = []
-    for p in phrases:
-        words = _WORD.findall(p)
-        if words:
-            terms.append('"' + " ".join(words) + '"')
-    for w in _WORD.findall(rest):
-        if len(w) >= 2:
-            terms.append(f'"{w}"*')
-        else:
-            terms.append(f'"{w}"')
-    joiner = " AND " if mode == "and" else " OR "
-    return joiner.join(terms)
 
 
 @dataclass
@@ -73,52 +51,29 @@ def _video_url(video_id: str, start: float | None = None) -> str:
     return f"{base}&t={int(start)}s" if start is not None else base
 
 
-def _fts_hits(db: Database, q: str, limit: int) -> list[tuple[int, float]]:
-    """Vrátí [(chunk_id, bm25)] – nižší bm25 = lepší."""
+def _fts_hits(db, q: str, limit: int) -> list[tuple[int, float]]:
+    """Nejprve AND, při nule výsledků OR."""
     for mode in ("and", "or"):
-        fq = build_fts_query(q, mode)
-        if not fq:
-            return []
-        try:
-            rows = db.conn.execute(
-                "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY r LIMIT ?",
-                (fq, limit),
-            ).fetchall()
-        except Exception:
-            rows = []
+        rows = db.fts_hits(q, mode, limit)
         if rows:
-            return [(r["rowid"], r["r"]) for r in rows]
+            return rows
     return []
 
 
-def _vec_hits(db: Database, qvec: list[float], limit: int) -> list[tuple[int, float]]:
-    rows = db.conn.execute(
-        "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (serialize_f32(qvec), limit),
-    ).fetchall()
+def _vec_hits(db, qvec: list[float], limit: int) -> list[tuple[int, float]]:
+    rows = db.vec_hits(qvec, limit)
     if not rows:
         return []
-    best_sim = 1.0 - rows[0]["distance"]
+    best_sim = 1.0 - rows[0][1]
     threshold = max(best_sim - VEC_SIM_MARGIN, VEC_SIM_FLOOR)
-    return [(r["chunk_id"], r["distance"]) for r in rows if (1.0 - r["distance"]) >= threshold]
+    return [(cid, d) for cid, d in rows if (1.0 - d) >= threshold]
 
 
-def _snippet(db: Database, chunk_id: int, q: str, text: str, max_chars: int = 320) -> tuple[str, str]:
-    """(plain, highlighted). Zvýraznění dělá FTS5 snippet(); pro čistě sémantické zásahy ruční fallback."""
+def _snippet(db, chunk_id: int, q: str, text: str, max_chars: int = 320) -> tuple[str, str]:
+    """(plain, highlighted). Zvýraznění dělá databáze; pro čistě sémantické zásahy ruční fallback."""
     for mode in ("and", "or"):
-        fq = build_fts_query(q, mode)
-        if not fq:
-            break
-        try:
-            row = db.conn.execute(
-                "SELECT snippet(chunks_fts, 0, '<mark>', '</mark>', '…', 40) AS s FROM chunks_fts "
-                "WHERE rowid = ? AND chunks_fts MATCH ?",
-                (chunk_id, fq),
-            ).fetchone()
-        except Exception:
-            row = None
-        if row and row["s"]:
-            hl = row["s"]
+        hl = db.snippet(chunk_id, q, mode)
+        if hl:
             return re.sub(r"</?mark>", "", hl), hl
     plain = text if len(text) <= max_chars else text[:max_chars].rsplit(" ", 1)[0] + "…"
     return plain, _manual_highlight(plain, q)
@@ -147,7 +102,7 @@ def _manual_highlight(text: str, q: str) -> str:
     return "".join(out)
 
 
-def search(db: Database, q: str, limit: int = 20, mode: str = "hybrid",
+def search(db, q: str, limit: int = 20, mode: str = "hybrid",
            embed_query=None, per_video_matches: int = 3, candidates: int = 200) -> list[VideoHit]:
     """mode: hybrid | fts | vector. embed_query: callable(str) -> list[float] (None = jen fulltext)."""
     q = q.strip()
@@ -169,12 +124,7 @@ def search(db: Database, q: str, limit: int = 20, mode: str = "hybrid",
     if not rrf:
         return []
 
-    ids = list(rrf)
-    rows = db.conn.execute(
-        f"SELECT c.id, c.video_id, c.start, c.end, c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url "
-        f"FROM chunks c JOIN videos v ON v.id = c.video_id WHERE c.id IN ({','.join('?' * len(ids))})",
-        ids,
-    ).fetchall()
+    rows = db.fetch_chunks(list(rrf))
 
     by_video: dict[str, list] = {}
     for r in rows:

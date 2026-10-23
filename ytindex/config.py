@@ -31,10 +31,10 @@ class TranscriptConfig:
 
 @dataclass
 class GeminiConfig:
-    model: str = "gemini-2.5-flash-lite"      # model pro transkripci videí bez titulků
+    model: str = "gemini-3.5-flash-lite"      # model pro transkripci videí bez titulků
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
-    transcribe_window_s: int = 1800           # délka úseku videa pro jednu transkripční žádost
+    transcribe_window_s: int = 600            # délka úseku videa pro jednu transkripční žádost (10 min ≈ 19k tokenů, ~13 s)
     transcribe_fps: float = 0.1               # málo snímků = levné; zajímá nás audio
 
 

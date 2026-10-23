@@ -35,3 +35,11 @@ def test_parse_iso_duration():
     assert parse_iso_duration("PT1H2M3S") == 3723
     assert parse_iso_duration("PT45S") == 45
     assert parse_iso_duration("") is None
+
+
+def test_parse_timestamp():
+    from ytindex.transcripts import parse_timestamp
+    assert parse_timestamp("20:08") == 1208
+    assert parse_timestamp("1:02:03") == 3723
+    assert parse_timestamp(63) == 63.0
+    assert parse_timestamp("abc") is None and parse_timestamp("") is None
