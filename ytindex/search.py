@@ -19,7 +19,10 @@ VEC_SIM_FLOOR = 0.5
 VEC_CANDIDATES = 80
 # váhy ve fúzi: fulltext AND (všechna slova) je silný signál → vyšší váha; OR fallback je šum,
 # v hybridním režimu se nepoužívá (sémantiku pokryjí vektory), jen v čistém fts
-W_FTS_AND, W_FTS_OR, W_VEC = 1.5, 0.4, 1.0
+W_FTS_AND, W_FTS_OR, W_VEC = 1.0, 0.4, 1.0
+# chunk, který najde fulltext i vektory zároveň, je skoro jistě správně → bonus (potlačí lexikální falešné shody,
+# např. "stát" jako sloveso v dotazu "proč je stát zbytečný")
+BOTH_BONUS = 1.3
 _WORD = re.compile(r"[\w]+", re.UNICODE)
 
 
@@ -120,17 +123,21 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
     use_vec = mode in ("hybrid", "vector") and embed_query is not None and db.vec_available
     rrf: dict[int, float] = {}
     counted: set[int] = set()   # chunky, které se počítají jako "shoda"
+    in_fts: set[int] = set()
     if mode in ("hybrid", "fts") or not use_vec:
         hits, weight = _fts_hits(db, q, candidates, allow_or=not use_vec)
         for rank, (cid, _) in enumerate(hits):
             rrf[cid] = rrf.get(cid, 0.0) + weight / (RRF_K + rank)
             counted.add(cid)
+            in_fts.add(cid)
     if use_vec:
         try:
             qvec = embed_query(q)
             hits, close = _vec_hits(db, qvec, VEC_CANDIDATES)
             for rank, (cid, _) in enumerate(hits):
                 rrf[cid] = rrf.get(cid, 0.0) + W_VEC / (RRF_K + rank)
+                if cid in in_fts:
+                    rrf[cid] *= BOTH_BONUS
             counted |= close
         except Exception:
             if mode == "vector":

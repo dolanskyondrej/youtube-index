@@ -144,12 +144,14 @@ místo (±150 s) první / v top 5. Skript: `scratchpad/eval.py` v session, data 
 | parafráze | vector | 0.90 | 1.00 | 0.80 | 0.90 |
 | parafráze | **hybrid** | **0.90** | **1.00** | **0.80** | **0.90** |
 | klíčová slova | fts | 1.00 | 1.00 | 1.00 | 1.00 |
-| klíčová slova | vector | 0.60 | 0.87 | 0.50 | 0.73 |
-| klíčová slova | **hybrid** | **1.00** | **1.00** | **1.00** | **1.00** |
+| klíčová slova | vector | 0.57 | 0.90 | 0.50 | 0.77 |
+| klíčová slova | **hybrid** | **0.83** | **1.00** | **0.83** | **1.00** |
 
-Hybrid tedy drží maximum obou režimů. Klíčové nastavení: dokumenty `RETRIEVAL_DOCUMENT`, dotazy `RETRIEVAL_QUERY`,
-normalizované vektory, cosine; stopslova se z fulltextu vyhazují; ve fúzi (RRF) má fulltext se všemi slovy
-váhu 1,5, vektory 1,0 a OR‑fallback se v hybridu nepoužívá. Gemini podobnosti jsou „ploché“
+Hybrid tedy drží kvalitu vektorů na parafrázích a téměř plnou kvalitu fulltextu na klíčových slovech (pro čistě
+lexikální dotazy je k dispozici `mode=fts`). Klíčové nastavení: dokumenty `RETRIEVAL_DOCUMENT`, dotazy
+`RETRIEVAL_QUERY`, normalizované vektory, cosine; stopslova se z fulltextu vyhazují; ve fúzi (RRF) má fulltext se
+všemi slovy váhu 1,0, vektory 1,0, chunk nalezený oběma cestami dostane bonus 1,3 a OR‑fallback se v hybridu nepoužívá
+(vyšší váha fulltextu zlepší klíčová slova na 1,00, ale protlačí lexikální falešné shody jako „stát“ = sloveso). Gemini podobnosti jsou „ploché“
 (relevantní ≈ 0,70–0,75, nesmysl ≈ 0,60–0,65), proto se počet shod počítá jen z chunků do 0,03 od nejlepšího.
 Stejný eval s 256‑d vektory: parafráze 0,83 / 0,93 (místo 0,77 / 0,83), index 2× menší.
 
