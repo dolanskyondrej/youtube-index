@@ -249,7 +249,8 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
-        return Response(status_code=204)
+        ico = WEB_DIR / "favicon.ico"
+        return FileResponse(ico, media_type="image/x-icon") if ico.exists() else Response(status_code=204)
 
     @app.get("/", include_in_schema=False)
     def index():

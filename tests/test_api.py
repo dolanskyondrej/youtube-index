@@ -27,6 +27,7 @@ def test_api_endpoints(cfg, db):
     assert client.get("/api/videos/neexistuje").status_code == 404
 
     assert client.get("/").status_code == 200
+    assert client.get("/favicon.ico").headers["content-type"].startswith("image/")
     assert "openapi" in client.get("/openapi.json").json()
     assert client.options("/api/search", headers={"Origin": "https://x.example", "Access-Control-Request-Method": "GET"}).headers.get("access-control-allow-origin") == "*"
 

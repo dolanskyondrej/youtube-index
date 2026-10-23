@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Hledání v kanálu</title>
+<title>Index - Kanál Svobodného přístavu</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
 <meta name="theme-color" content="#111111">
 <style>
   /* Barvy Svobodného přístavu: žlutá + černá, světlé/tmavé téma. */
@@ -11,24 +12,28 @@
     --yellow: #f7c600; --yellow-ink: #111111; --yellow-soft: #fff1b3;
     --bg: #ffffff; --fg: #111111; --muted: #5f5f5f; --surface: #f7f7f5; --line: #e2e2dd;
     --accent: #111111; --accent-ink: #ffffff; --link: #8a6d00; --mark: #ffe066; --mark-ink: #111111;
-    --tab-bg: #efefeb; --tab-active: #111111; --tab-active-ink: #f7c600;
+    --tab-bg: #efefeb; --tab-active: #111111; --tab-active-ink: #f7c600; --code-bg: #111111; --code-fg: #f2f2ef;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --yellow-soft: #3d3300;
       --bg: #0f0f10; --fg: #f2f2ef; --muted: #a3a39c; --surface: #1a1a1c; --line: #2c2c2f;
       --accent: #f7c600; --accent-ink: #111111; --link: #f7c600; --mark: #5c4a00; --mark-ink: #fff3b0;
-      --tab-bg: #1a1a1c; --tab-active: #f7c600; --tab-active-ink: #111111;
+      --tab-bg: #1a1a1c; --tab-active: #f7c600; --tab-active-ink: #111111; --code-bg: #000000; --code-fg: #f2f2ef;
     }
   }
   * { box-sizing: border-box }
   html { -webkit-text-size-adjust: 100% }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif }
   .band { background: #111; color: #fff; border-bottom: 4px solid var(--yellow) }
-  .band .in { max-width: 960px; margin: 0 auto; padding: 18px max(16px, env(safe-area-inset-left)) 16px max(16px, env(safe-area-inset-right)); display: grid; gap: 4px }
-  h1 { font-size: 22px; margin: 0; line-height: 1.2 } h1 a { color: #fff; text-decoration: none }
+  .band .in { max-width: 960px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-left)) 0 max(16px, env(safe-area-inset-right)); display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start }
+  h1 { font-size: 22px; margin: 0; line-height: 1.2 } h1 a { color: #fff; text-decoration: none } h1 a:hover { color: var(--yellow) }
   h1 a::before { content: ""; display: inline-block; width: 12px; height: 12px; background: var(--yellow); margin-right: 10px; transform: rotate(45deg); vertical-align: 1px }
-  .sub { color: #c9c9c3; font-size: 13px }
+  .sub { color: #c9c9c3; font-size: 13px; padding-bottom: 14px } .sub a { color: #c9c9c3 } .sub a:hover { color: var(--yellow) }
+  nav.top { display: flex; gap: 4px; grid-row: 1 / span 2; align-self: end }
+  nav.top button, nav.top a { font: 600 14px/1 inherit; color: #fff; background: transparent; border: 0; border-bottom: 4px solid transparent; margin-bottom: -4px; padding: 10px 12px 12px; cursor: pointer; text-decoration: none }
+  nav.top button[aria-pressed="true"], nav.top button:hover, nav.top a:hover { color: var(--yellow); border-bottom-color: var(--yellow) }
+  nav.top button:focus-visible { outline: 2px solid var(--yellow); outline-offset: -2px }
   main { max-width: 960px; margin: 0 auto; padding: 14px max(16px, env(safe-area-inset-left)) 56px max(16px, env(safe-area-inset-right)) }
   .search { display: grid; gap: 10px }
   .tabs { display: flex; gap: 4px; background: var(--tab-bg); padding: 4px; border-radius: 12px; width: fit-content; max-width: 100% }
@@ -51,7 +56,25 @@
   .m a { color: var(--link); text-decoration: none; font-variant-numeric: tabular-nums; font-weight: 600; margin-right: 6px; white-space: nowrap }
   mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padding: 0 2px }
   .more { font-size: 13px; color: var(--link); background: none; border: 0; padding: 4px 0; cursor: pointer; font-weight: 600 }
+
+  /* --- MCP návod (pop-up) --- */
+  dialog.mcp { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 0; border: 0; border-radius: 16px; background: var(--bg); color: var(--fg); box-shadow: 0 20px 60px rgba(0,0,0,.4) }
+  dialog.mcp::backdrop { background: rgba(0,0,0,.55) }
+  .mcp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; background: #111; color: #fff; border-bottom: 4px solid var(--yellow) }
+  .mcp-head h2 { font-size: 18px; margin: 0 } .mcp-head button { font-size: 22px; line-height: 1; background: transparent; border: 0; color: #fff; cursor: pointer; padding: 4px 8px }
+  .mcp-body { padding: 16px 18px 20px; display: grid; gap: 12px; overflow: auto; max-height: calc(100vh - 110px) }
+  .mcp-url { display: flex; gap: 8px; align-items: center; flex-wrap: wrap } .mcp-url code { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 14px }
+  .mcp-body p { margin: 0 } .mcp-body ol { margin: 0; padding-left: 20px } .mcp-body li { margin: 2px 0 }
+  .agents { display: flex; flex-wrap: wrap; gap: 6px }
+  .agents button { font: 600 13px/1 inherit; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--fg); cursor: pointer }
+  .agents button[aria-selected="true"] { background: var(--tab-active); color: var(--tab-active-ink); border-color: var(--tab-active) }
+  .agent { display: grid; gap: 8px; font-size: 15px }
+  pre { position: relative; margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 12px 14px; font-size: 13px; overflow-x: auto }
+  .copy { font: 600 12px inherit; padding: 6px 10px; border: 0; border-radius: 8px; background: var(--yellow); color: var(--yellow-ink); cursor: pointer; white-space: nowrap }
+  .copywrap { display: grid; gap: 6px; justify-items: end }
+  .tools { font-size: 13px; color: var(--muted) }
   @media (max-width: 600px) {
+    .band .in { grid-template-columns: 1fr } nav.top { grid-row: auto; margin-top: -6px }
     .hit { grid-template-columns: 1fr; gap: 10px; padding: 12px }
     .tabs { width: 100% } .tabs button { padding: 9px 6px; font-size: 13px }
     button.go { padding: 12px 14px }
@@ -62,7 +85,11 @@
 <body>
 <header class="band">
   <div class="in">
-    <h1><a id="chname" href="#">Hledání v kanálu</a></h1>
+    <h1><a id="chname" href="https://urza.cz" rel="noopener">Index - Kanál Svobodného přístavu</a></h1>
+    <nav class="top" aria-label="Sekce">
+      <button type="button" id="mcpbtn" aria-pressed="false" aria-haspopup="dialog">MCP</button>
+      <a href="/docs" target="_blank" rel="noopener">API</a>
+    </nav>
     <div class="sub" id="chstats">Načítám…</div>
   </div>
 </header>
@@ -82,8 +109,23 @@
   <div class="status" id="status"></div>
   <div id="results"></div>
 </main>
+
+<dialog class="mcp" id="mcp" aria-labelledby="mcptitle">
+  <div class="mcp-head">
+    <h2 id="mcptitle">Připojit index jako MCP do AI agenta</h2>
+    <button type="button" id="mcpclose" aria-label="Zavřít">×</button>
+  </div>
+  <div class="mcp-body">
+    <p>Přes <abbr title="Model Context Protocol">MCP</abbr> může Claude, ChatGPT nebo kódovací agent hledat v přepisech sám: nástroje <code>search_videos</code>, <code>research_topic</code> (rešerše pro psaní), <code>ask_channel</code> (odpověď s citacemi), <code>get_transcript</code>, <code>list_videos</code>. Server je veřejný, bez přihlášení (Streamable HTTP).</p>
+    <div class="mcp-url"><code id="mcpurl"></code><button type="button" class="copy" data-copy="#mcpurl">Kopírovat adresu</button></div>
+    <div class="agents" role="tablist" aria-label="Agent" id="agents"></div>
+    <div class="agent" id="agent"></div>
+  </div>
+</dialog>
+
 <script>
 const API = location.origin;
+const MCP_URL = location.origin + '/mcp';
 const $ = s => document.querySelector(s);
 const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // highlighted obsahuje jen <mark> značky z backendu – escapujeme vše ostatní
@@ -108,9 +150,9 @@ async function loadChannel(){
   try{
     const r = await fetch(API+'/api/channel'); if(!r.ok) throw 0;
     const c = await r.json();
-    $('#chname').textContent = c.name; $('#chname').href = c.url; document.title = c.name + ' – hledání';
+    $('#chname').textContent = 'Index - ' + c.name; document.title = 'Index - ' + c.name;
     const s = c.stats, done = (s.videos_by_status||{}).done||0;
-    $('#chstats').textContent = `${done} z ${s.videos} videí zaindexováno · ${s.total_hours} h přepisů`;
+    $('#chstats').innerHTML = `${done} z ${s.videos} videí zaindexováno · ${s.total_hours} h přepisů · <a href="${esc(c.url)}" target="_blank" rel="noopener">kanál na YouTube</a>`;
     if (!s.vector_search) { document.querySelectorAll('.tabs [role=tab]').forEach(b => { if (b.dataset.mode !== 'fts') b.disabled = true; }); setMode('fts', {store:false}); }
   }catch{ $('#chstats').textContent = 'Kanál zatím není inicializován (ytindex init / ingest).'; }
 }
@@ -138,12 +180,72 @@ async function doSearch(q){
   $('#results').querySelectorAll('.more').forEach(b => b.addEventListener('click', () => { b.parentNode.querySelectorAll('.m').forEach(e => e.hidden = false); b.remove(); }));
 }
 
+// ---------- MCP návod ----------
+const JSON_HTTP = JSON.stringify({ mcpServers: { ytindex: { type: 'http', url: MCP_URL } } }, null, 2);
+const AGENTS = [
+  { id: 'claude', name: 'Claude (web / Desktop)', steps: [
+      'Otevři <b>Settings → Connectors</b> (claude.ai nebo aplikace Claude Desktop).',
+      'Klikni <b>Add custom connector</b>, jako název zadej <code>ytindex</code> a vlož adresu serveru výše. Autentizaci nech prázdnou.',
+      'V novém chatu zapni konektor v menu nástrojů (ikona + / „Search and tools“).',
+      'Zkus: <i>„Udělej rešerši, jak Urza argumentuje proti daním, cituj s odkazy na čas.“</i>' ] },
+  { id: 'claude-code', name: 'Claude Code', cmd: `claude mcp add --transport http --scope project ytindex ${MCP_URL}`,
+    steps: ['V terminálu ve složce projektu spusť příkaz níže (zapíše <code>.mcp.json</code> do projektu; s <code>--scope user</code> platí ve všech projektech).',
+            'Nebo soubor <code>.mcp.json</code> vytvoř ručně (JSON níže) a při startu <code>claude</code> server povol.',
+            'Ověř příkazem <code>/mcp</code>.'], json: JSON_HTTP },
+  { id: 'cursor', name: 'Cursor', steps: [
+      'Vytvoř soubor <code>.cursor/mcp.json</code> v projektu (nebo <code>~/.cursor/mcp.json</code> globálně) s obsahem níže.',
+      'V <b>Settings → MCP</b> se server objeví, zapni ho a zkontroluj zelenou tečku.' ], json: JSON_HTTP },
+  { id: 'vscode', name: 'VS Code (Copilot)', steps: [
+      'Vytvoř v projektu <code>.vscode/mcp.json</code> s obsahem níže (nebo příkaz <b>MCP: Add Server</b> → HTTP).',
+      'V Copilot Chat přepni na režim <b>Agent</b> a v ikoně nástrojů zaškrtni <code>ytindex</code>.' ],
+    json: JSON.stringify({ servers: { ytindex: { type: 'http', url: MCP_URL } } }, null, 2) },
+  { id: 'windsurf', name: 'Windsurf', steps: [
+      'Otevři <b>Settings → Windsurf Settings → Cascade → MCP Servers → Add custom server</b> (soubor <code>~/.codeium/windsurf/mcp_config.json</code>).',
+      'Vlož konfiguraci níže a klikni Refresh.' ],
+    json: JSON.stringify({ mcpServers: { ytindex: { serverUrl: MCP_URL } } }, null, 2) },
+  { id: 'chatgpt', name: 'ChatGPT', steps: [
+      'V <b>Settings → Connectors</b> zapni <b>Developer mode</b> (Advanced).',
+      'Klikni <b>Create</b>, název <code>ytindex</code>, MCP Server URL = adresa výše, Authentication: <b>No authentication</b>.',
+      'V chatu přidej konektor přes „+“ → <b>Developer mode</b> a ptej se.' ] },
+  { id: 'gemini', name: 'Gemini CLI', cmd: `gemini mcp add --transport http ytindex ${MCP_URL}`,
+    steps: ['Spusť příkaz níže, nebo přidej do <code>~/.gemini/settings.json</code> JSON níže.'],
+    json: JSON.stringify({ mcpServers: { ytindex: { httpUrl: MCP_URL } } }, null, 2) },
+  { id: 'codex', name: 'Codex CLI', cmd: `codex mcp add ytindex --url ${MCP_URL}`,
+    steps: ['Spusť příkaz níže, nebo přidej do <code>~/.codex/config.toml</code> blok níže.'],
+    json: `[mcp_servers.ytindex]\nurl = "${MCP_URL}"` },
+];
+let agentId = 'claude';
+function renderAgents() {
+  $('#agents').innerHTML = AGENTS.map(a => `<button type="button" role="tab" data-id="${a.id}" aria-selected="${String(a.id === agentId)}">${a.name}</button>`).join('');
+  const a = AGENTS.find(x => x.id === agentId);
+  $('#agent').innerHTML = `
+    <ol>${a.steps.map(s => `<li>${s}</li>`).join('')}</ol>
+    ${a.cmd ? `<div class="copywrap"><pre id="cmd-${a.id}">${esc(a.cmd)}</pre><button type="button" class="copy" data-copy="#cmd-${a.id}">Kopírovat příkaz</button></div>` : ''}
+    ${a.json ? `<div class="copywrap"><pre id="json-${a.id}">${esc(a.json)}</pre><button type="button" class="copy" data-copy="#json-${a.id}">Kopírovat konfiguraci</button></div>` : ''}
+    <p class="tools">Po připojení je dobré agentovi říct, k čemu index je: „Když se ptám na Urzu nebo Svobodný přístav, použij ytindex a cituj s odkazy na čas.“</p>`;
+  $('#agents').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { agentId = b.dataset.id; try { localStorage.setItem('ytindex.agent', agentId); } catch {} renderAgents(); }));
+}
+function openMcp() { $('#mcpurl').textContent = MCP_URL; renderAgents(); $('#mcp').showModal(); $('#mcpbtn').setAttribute('aria-pressed', 'true'); }
+$('#mcpbtn').addEventListener('click', openMcp);
+$('#mcpclose').addEventListener('click', () => $('#mcp').close());
+$('#mcp').addEventListener('close', () => $('#mcpbtn').setAttribute('aria-pressed', 'false'));
+$('#mcp').addEventListener('click', e => { if (e.target === $('#mcp')) $('#mcp').close(); });
+document.addEventListener('click', async e => {
+  const b = e.target.closest('.copy'); if (!b) return;
+  const text = $(b.dataset.copy).textContent;
+  try { await navigator.clipboard.writeText(text); b.textContent = 'Zkopírováno'; }
+  catch { const r = document.createRange(); r.selectNodeContents($(b.dataset.copy)); getSelection().removeAllRanges(); getSelection().addRange(r); b.textContent = 'Označeno, zkopíruj ručně'; }
+  setTimeout(() => { b.textContent = b.dataset.copy.startsWith('#mcpurl') ? 'Kopírovat adresu' : b.dataset.copy.startsWith('#cmd') ? 'Kopírovat příkaz' : 'Kopírovat konfiguraci'; }, 1800);
+});
+try { const a = localStorage.getItem('ytindex.agent'); if (a && AGENTS.some(x => x.id === a)) agentId = a; } catch {}
+
 $('#f').addEventListener('submit', e => { e.preventDefault(); doSearch($('#q').value); });
 const p = new URLSearchParams(location.search);
 let saved = null; try { saved = localStorage.getItem('ytindex.mode'); } catch {}
 setMode(HINTS[p.get('mode')] ? p.get('mode') : (HINTS[saved] ? saved : 'hybrid'), {store:false});
 loadChannel();
 if(p.get('q')){ $('#q').value = p.get('q'); doSearch(p.get('q')); }
+if(location.hash === '#mcp') openMcp();
 </script>
 </body>
 </html>
