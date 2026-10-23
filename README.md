@@ -126,8 +126,13 @@ GEMINI_API_KEY=… CHANNEL="https://youtube.com/@kanalsvobodnehopristavu" YTINDE
 * **SQLite index v Cloud Storage** (`YTINDEX_GCS_DB=gs://…/index.sqlite`): žádný databázový server. Instance si index
   stáhne při startu; po nové indexaci se nahraje zpět (`ytindex cloud-ingest`) nebo ručně
   (`gcloud storage cp data/index.sqlite gs://…`). Cena úložiště: centy.
-* **Cloud Run Job** `ytindex cloud-ingest`: indexace přes Gemini (z cloudu jsou YouTube titulky blokované), resumable;
+* **Cloud Run Job** `ytindex cloud-ingest`: indexace přes Gemini (z cloudu jsou YouTube titulky blokované).
+  Okna videa se přepisují souběžně (`gemini.concurrency`, výchozí 4), každých 5 videí se index i s embeddingy
+  nahraje do bucketu (checkpoint), takže pád nebo limit jobu (24 h) nic neztratí – job se prostě spustí znovu
+  a pokračuje. Bucket má zapnuté verzování objektů, starší verze indexu jdou obnovit.
   `YTINDEX_LIMIT=10` omezí test na prvních 10 videí. Levnější cesta: indexovat doma z titulků a index jen nahrát.
+* **Přenositelnost:** přepisy (segmenty s časy), chunky i embeddingy jsou v indexu; `ytindex copy --to …` je
+  přenese do Postgresu nebo jiného SQLite beze ztráty, přepis se nikdy nemusí platit znovu.
 * Volitelně **PostgreSQL + pgvector** (`DATABASE_URL=postgresql://…`, backend `ytindex/db_postgres.py`) pro větší
   provoz nebo více zapisujících procesů; stejné API i hledání.
 * Klíče jdou výhradně přes Secret Manager / env (`GEMINI_API_KEY`); kanál přes `YTINDEX_CHANNEL` (bez `ytindex.toml`).

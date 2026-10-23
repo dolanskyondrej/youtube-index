@@ -36,7 +36,10 @@ Je idempotentní: další spuštění jen nasadí novou verzi.
 
 * **Lokálně (levně, z titulků):** `ytindex ingest` doma → `gcloud storage cp data/index.sqlite gs://<projekt>-ytindex/index.sqlite`.
 * **V cloudu (Gemini):** `gcloud run jobs execute ytindex-ingest --region europe-west1 --wait`
-  (`YTINDEX_LIMIT` v env jobu omezuje počet videí; bez něj celý kanál, job je resumable, limit 24 h na běh).
+  (`YTINDEX_LIMIT` v env jobu omezuje počet videí; bez něj celý kanál). Job je resumable a každých 5 videí ukládá
+  checkpoint do bucketu; limit jednoho běhu je 24 h, celý kanál (~1 500 h videa) trvá odhadem 20–30 h, tedy
+  2 běhy za sebou (druhý naváže). Paralelní tasky (`--tasks N`) s SQLite v bucketu nepoužívat (jeden zapisovatel).
+  Odhad ceny: Gemini ~75 USD + embeddingy ~2 USD + CPU jobu ~3 USD, jednorázově.
 
 Služba po nahrání nového indexu začne nový index používat, jakmile se vytvoří nová instance (škáluje na 0, tj.
 po ~15 min klidu). Vynutit ihned: `gcloud run services update ytindex --region europe-west1 --update-env-vars INDEX_VERSION=$(date +%s)`.
