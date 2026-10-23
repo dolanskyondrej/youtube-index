@@ -11,10 +11,15 @@ from .chunking import format_timestamp
 from .query import build_fts_query  # noqa: F401  (re-export pro zpětnou kompatibilitu testů)
 
 RRF_K = 60
-# vektorové kandidáty ořízneme na ty, které jsou "blízko" nejlepšího zásahu – k-NN vrací vždy k výsledků,
-# i když jsou nesmyslné, a ty by jinak falešně zvyšovaly match_count
-VEC_SIM_MARGIN = 0.15
-VEC_SIM_FLOOR = 0.2
+# Gemini embeddingy mají plochou škálu podobností (relevantní ~0.70–0.75, nesmysl ~0.60–0.65), proto:
+# - do fúze jde vektorový top-N podle pořadí,
+# - "shoda" (match_count) se počítá jen z chunků blízko nejlepšího (margin) nebo s lexikální shodou.
+VEC_SIM_MARGIN = 0.03
+VEC_SIM_FLOOR = 0.5
+VEC_CANDIDATES = 80
+# váhy ve fúzi: fulltext AND (všechna slova) je silný signál → vyšší váha; OR fallback je šum,
+# v hybridním režimu se nepoužívá (sémantiku pokryjí vektory), jen v čistém fts
+W_FTS_AND, W_FTS_OR, W_VEC = 1.5, 0.4, 1.0
 _WORD = re.compile(r"[\w]+", re.UNICODE)
 
 
@@ -51,22 +56,26 @@ def _video_url(video_id: str, start: float | None = None) -> str:
     return f"{base}&t={int(start)}s" if start is not None else base
 
 
-def _fts_hits(db, q: str, limit: int) -> list[tuple[int, float]]:
-    """Nejprve AND, při nule výsledků OR."""
-    for mode in ("and", "or"):
+def _fts_hits(db, q: str, limit: int, allow_or: bool = True) -> tuple[list[tuple[int, float]], float]:
+    """Nejprve AND, při nule výsledků (volitelně) OR. Vrací (zásahy, váha)."""
+    for mode, weight in (("and", W_FTS_AND), ("or", W_FTS_OR)):
+        if mode == "or" and not allow_or:
+            break
         rows = db.fts_hits(q, mode, limit)
         if rows:
-            return rows
-    return []
+            return rows, weight
+    return [], 0.0
 
 
-def _vec_hits(db, qvec: list[float], limit: int) -> list[tuple[int, float]]:
+def _vec_hits(db, qvec: list[float], limit: int) -> tuple[list[tuple[int, float]], set[int]]:
+    """(top-N podle vzdálenosti, množina id "blízko nejlepšího" pro počítání shod)"""
     rows = db.vec_hits(qvec, limit)
     if not rows:
-        return []
+        return [], set()
     best_sim = 1.0 - rows[0][1]
     threshold = max(best_sim - VEC_SIM_MARGIN, VEC_SIM_FLOOR)
-    return [(cid, d) for cid, d in rows if (1.0 - d) >= threshold]
+    close = {cid for cid, d in rows if (1.0 - d) >= threshold}
+    return rows, close
 
 
 def _snippet(db, chunk_id: int, q: str, text: str, max_chars: int = 320) -> tuple[str, str]:
@@ -110,14 +119,19 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
         return []
     use_vec = mode in ("hybrid", "vector") and embed_query is not None and db.vec_available
     rrf: dict[int, float] = {}
+    counted: set[int] = set()   # chunky, které se počítají jako "shoda"
     if mode in ("hybrid", "fts") or not use_vec:
-        for rank, (cid, _) in enumerate(_fts_hits(db, q, candidates)):
-            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+        hits, weight = _fts_hits(db, q, candidates, allow_or=not use_vec)
+        for rank, (cid, _) in enumerate(hits):
+            rrf[cid] = rrf.get(cid, 0.0) + weight / (RRF_K + rank)
+            counted.add(cid)
     if use_vec:
         try:
             qvec = embed_query(q)
-            for rank, (cid, _) in enumerate(_vec_hits(db, qvec, candidates)):
-                rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank)
+            hits, close = _vec_hits(db, qvec, VEC_CANDIDATES)
+            for rank, (cid, _) in enumerate(hits):
+                rrf[cid] = rrf.get(cid, 0.0) + W_VEC / (RRF_K + rank)
+            counted |= close
         except Exception:
             if mode == "vector":
                 raise
@@ -134,8 +148,9 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
     for vid, chunks in by_video.items():
         chunks.sort(key=lambda r: -rrf[r["id"]])
         best = max(rrf[r["id"]] for r in chunks)
-        # skóre videa: nejlepší chunk + malý bonus za počet dalších zásahů
-        score = best * (1 + 0.1 * math.log1p(len(chunks) - 1))
+        n_matches = sum(1 for r in chunks if r["id"] in counted) or 1
+        # skóre videa: nejlepší chunk + malý bonus za počet dalších skutečných zásahů
+        score = best * (1 + 0.1 * math.log1p(n_matches - 1))
         matches = []
         taken: list[tuple[float, float]] = []
         for r in chunks:
@@ -153,7 +168,7 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
             video_id=vid, title=v["title"], url=_video_url(vid),
             thumbnail=v["thumbnail_url"] or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
             published_at=v["published_at"], duration_s=v["duration_s"],
-            score=round(score, 6), match_count=len(chunks), match=matches[0], matches=matches,
+            score=round(score, 6), match_count=n_matches, match=matches[0], matches=matches,
         ))
     hits.sort(key=lambda h: -h.score)
     return hits[:limit]

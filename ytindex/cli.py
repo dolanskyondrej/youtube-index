@@ -219,7 +219,8 @@ def cmd_cloud_serve(args) -> int:
     _gcs_pull(cfg)
     db = open_database(cfg)
     _ensure_channel(cfg, db)
-    uvicorn.run(create_app(cfg, db), host="0.0.0.0", port=int(os.environ.get("PORT", args.port)), log_level="info")
+    uvicorn.run(create_app(cfg, db), host="0.0.0.0", port=int(os.environ.get("PORT", args.port)), log_level="info",
+                proxy_headers=True, forwarded_allow_ips="*")
     return 0
 
 
@@ -227,7 +228,7 @@ def cmd_embed(args) -> int:
     from .db import open_database
 
     cfg = load_config()
-    return run_embed(cfg, open_database(cfg))
+    return run_embed(cfg, open_database(cfg, reset_on_mismatch=True))
 
 
 def run_embed(cfg: Config, db) -> int:
@@ -236,6 +237,14 @@ def run_embed(cfg: Config, db) -> int:
     if not db.vec_available:
         print("sqlite-vec není k dispozici – vektorové hledání vypnuto.", file=sys.stderr)
         return 1
+    stored_model = db.get_meta("embedding_model")
+    if stored_model and stored_model != cfg.gemini.embedding_model and db.count_embedded()[0]:
+        print(f"Index má embeddingy z {stored_model}, config chce {cfg.gemini.embedding_model} – přepočítávám vše.")
+        db.set_meta("embedding_model", cfg.gemini.embedding_model)
+        with db.tx() as c:
+            c.execute("UPDATE chunks SET embedded = 0") if db.backend == "sqlite" else c.execute("UPDATE chunks SET embedding = NULL")
+    db.set_meta("embedding_model", cfg.gemini.embedding_model)
+    db.conn.commit()
     emb = Embedder(cfg)
     done, total = db.count_embedded()
     print(f"Embeddingy: {done}/{total} chunků hotovo, model {cfg.gemini.embedding_model} ({cfg.gemini.embedding_dim}d)")
@@ -260,7 +269,7 @@ def cmd_search(args) -> int:
     embed = None
     if args.mode != "fts" and cfg.gemini_api_key and db.count_embedded()[0]:
         from .embeddings import Embedder
-        embed = Embedder(cfg).embed_query
+        embed = Embedder(cfg, db).embed_query
     hits = search(db, args.query, limit=args.limit, mode=args.mode, embed_query=embed)
     for h in hits:
         print(f"{h.title}\n  {h.match.url}  [{h.match.timestamp}]  (shod: {h.match_count}, skóre {h.score:.4f})")

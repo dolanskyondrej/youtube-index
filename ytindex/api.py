@@ -108,7 +108,16 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
 
     from .mcp_server import build_mcp, http_app
     mcp = build_mcp(cfg, db)
-    mcp_app = http_app(mcp)
+    mcp_app = http_app(mcp)   # Starlette app s jedinou routou "/mcp"
+
+    class _McpEndpoint:  # raw ASGI (třída, ne funkce – Starlette by funkci obalil jako request handler)
+        async def __call__(self, scope, receive, send):
+            # /mcp i /mcp/ bez přesměrování (za proxy by redirect vedl na http://)
+            if scope["type"] == "http" and scope["path"].rstrip("/") == "/mcp":
+                scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}
+            await mcp_app(scope, receive, send)
+
+    mcp_endpoint = _McpEndpoint()
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
@@ -123,7 +132,9 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
                     "MCP server (Streamable HTTP) běží na /mcp.",
         lifespan=lifespan,
     )
-    app.mount("/mcp", mcp_app)
+    from starlette.routing import Route
+    app.router.routes.append(Route("/mcp", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
+    app.router.routes.append(Route("/mcp/", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"],
                        allow_headers=["*"], expose_headers=["Mcp-Session-Id"])
 
@@ -133,7 +144,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
             return None
         try:
             from .embeddings import Embedder
-            return Embedder(cfg)
+            return Embedder(cfg, db)
         except Exception as e:
             log.warning("Embedder nedostupný: %s", e)
             return None

@@ -88,9 +88,12 @@ def serialize_f32(vec: Iterable[float]) -> bytes:
 
 
 class Database:
-    def __init__(self, path: str | Path, embedding_dim: int = 768):
+    def __init__(self, path: str | Path, embedding_dim: int = 768, reset_on_mismatch: bool = False):
+        """reset_on_mismatch: True jen při `ytindex embed` – jiná dimenze pak zahodí vektory a přepočítá je.
+        Jinak (serve, search) se převezme dimenze uložená v DB, aby se index nikdy tiše nezničil."""
         self.path = str(path)
         self.embedding_dim = embedding_dim
+        self.reset_on_mismatch = reset_on_mismatch
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -118,9 +121,12 @@ class Database:
         if self.vec_available:
             stored = self.get_meta("embedding_dim")
             if stored and int(stored) != self.embedding_dim:
-                # jiná dimenze než uložené vektory – nutno re-embedovat
-                self.conn.execute("DROP TABLE IF EXISTS chunk_vec")
-                self.conn.execute("UPDATE chunks SET embedded = 0")
+                if self.reset_on_mismatch:
+                    # jiná dimenze než uložené vektory – zahodit a re-embedovat
+                    self.conn.execute("DROP TABLE IF EXISTS chunk_vec")
+                    self.conn.execute("UPDATE chunks SET embedded = 0")
+                else:
+                    self.embedding_dim = int(stored)
             self.conn.execute(
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0("
                 f"chunk_id INTEGER PRIMARY KEY, embedding float[{self.embedding_dim}] distance_metric=cosine)"
@@ -344,11 +350,11 @@ class Database:
         }
 
 
-def open_database(cfg, url: str | None = None):
-    """Factory: DATABASE_URL (postgresql://…) → Cloud SQL / Postgres + pgvector, jinak lokální SQLite."""
+def open_database(cfg, url: str | None = None, reset_on_mismatch: bool = False):
+    """Factory: DATABASE_URL (postgresql://…) → Postgres + pgvector, jinak lokální SQLite."""
     import os
     url = url or os.environ.get("DATABASE_URL", "")
     if url.startswith(("postgres://", "postgresql://")):
         from .db_postgres import PostgresDatabase
-        return PostgresDatabase(url, cfg.gemini.embedding_dim)
-    return Database(url or cfg.db_path, cfg.gemini.embedding_dim)
+        return PostgresDatabase(url, cfg.gemini.embedding_dim, reset_on_mismatch)
+    return Database(url or cfg.db_path, cfg.gemini.embedding_dim, reset_on_mismatch)

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ytindex": {
+      "type": "http",
+      "url": "https://ytindex-128410263808.europe-west1.run.app/mcp"
+    }
+  }
+}

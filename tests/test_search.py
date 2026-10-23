@@ -4,8 +4,10 @@ from ytindex.search import build_fts_query, search, strip_diacritics
 
 
 def test_build_fts_query():
-    assert build_fts_query('bitcoin "daně jsou krádež" a') == '"daně jsou krádež" AND "bitcoin"* AND "a"'
-    assert build_fts_query("x; DROP TABLE") == '"x" AND "DROP"* AND "TABLE"*'
+    assert build_fts_query('bitcoin "daně jsou krádež" a') == '"daně jsou krádež" AND "bitcoin"*'
+    assert build_fts_query('proč je stát zbytečný') == '"stát"* AND "zbytečný"*'
+    assert build_fts_query('je to') == '"je"* AND "to"*'   # jen stopslova → nic nevyhazovat
+    assert build_fts_query("x; DROP TABLE") == '"DROP"* AND "TABLE"*'
     assert build_fts_query("") == ""
 
 

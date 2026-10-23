@@ -25,7 +25,7 @@ def test_mcp_streamable_http(cfg, db):
         headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
                 "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
-        r = client.post("/mcp/", json=init, headers=headers)
+        r = client.post("/mcp", json=init, headers=headers)
         assert r.status_code == 200, r.text
         r = client.post("/mcp/", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers=headers)
         names = {t["name"] for t in r.json()["result"]["tools"]}

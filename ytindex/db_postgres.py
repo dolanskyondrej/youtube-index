@@ -87,9 +87,10 @@ class PostgresDatabase:
     backend = "postgres"
     vec_available = True
 
-    def __init__(self, url: str, embedding_dim: int = 768):
+    def __init__(self, url: str, embedding_dim: int = 768, reset_on_mismatch: bool = False):
         self.url = url
         self.embedding_dim = embedding_dim
+        self.reset_on_mismatch = reset_on_mismatch
         self.conn = psycopg.connect(url, row_factory=dict_row, autocommit=False)
         self._init_schema()
         register_vector(self.conn)
@@ -103,9 +104,12 @@ class PostgresDatabase:
             cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='chunks' AND column_name='embedding'")
             has_col = cur.fetchone() is not None
             if has_col and stored and stored != self.embedding_dim:
-                cur.execute("DROP INDEX IF EXISTS idx_chunks_embedding")
-                cur.execute("ALTER TABLE chunks DROP COLUMN embedding")
-                has_col = False
+                if self.reset_on_mismatch:
+                    cur.execute("DROP INDEX IF EXISTS idx_chunks_embedding")
+                    cur.execute("ALTER TABLE chunks DROP COLUMN embedding")
+                    has_col = False
+                else:
+                    self.embedding_dim = stored
             if not has_col:
                 cur.execute(f"ALTER TABLE chunks ADD COLUMN embedding vector({self.embedding_dim})")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks "

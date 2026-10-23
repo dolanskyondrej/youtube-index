@@ -43,7 +43,7 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
             return None
         try:
             from .embeddings import Embedder
-            return Embedder(cfg).embed_query
+            return Embedder(cfg, db).embed_query
         except Exception:
             return None
 
@@ -98,7 +98,7 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
 
 def http_app(mcp: MCPServer):
     """Starlette aplikace Streamable HTTP (bez session state – vhodné pro Cloud Run s více instancemi)."""
-    kwargs = dict(streamable_http_path="/", stateless_http=True, json_response=True)
+    kwargs = dict(streamable_http_path="/mcp", stateless_http=True, json_response=True)
     if TransportSecuritySettings is not None:
         # veřejné API za reverzní proxy (Cloud Run) – Host hlavička není localhost
         kwargs["transport_security"] = TransportSecuritySettings(enable_dns_rebinding_protection=False)

@@ -14,7 +14,8 @@ BATCH = 64
 
 
 class Embedder:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, db=None):
+        """db: pokud je zadaná, použije se dimenze (a model) uložené v indexu – dotaz musí odpovídat dokumentům."""
         if not cfg.gemini_api_key:
             raise RuntimeError("GEMINI_API_KEY není nastaven – semantické hledání vyžaduje Gemini embeddingy")
         from google import genai
@@ -22,6 +23,11 @@ class Embedder:
         self.client = genai.Client(api_key=cfg.gemini_api_key)
         self.model = cfg.gemini.embedding_model
         self.dim = cfg.gemini.embedding_dim
+        if db is not None:
+            self.dim = db.embedding_dim
+            stored_model = db.get_meta("embedding_model")
+            if stored_model:
+                self.model = stored_model
         # task_type podporuje jen embedding-001; embedding-2 používá textový prefix
         self.legacy = "001" in self.model
 
