@@ -264,6 +264,19 @@ class Database:
         row = self.conn.execute("SELECT SUM(embedded), COUNT(*) FROM chunks").fetchone()
         return int(row[0] or 0), int(row[1] or 0)
 
+    def chunk_ids(self, video_id: str) -> dict[int, int]:
+        """{idx: chunk_id} pro video."""
+        return {r["idx"]: r["id"] for r in self.conn.execute("SELECT id, idx FROM chunks WHERE video_id=?", (video_id,))}
+
+    def get_embeddings(self, video_id: str) -> dict[int, list[float]]:
+        """{idx: vektor} – pro přenos indexu do jiné databáze (ytindex copy)."""
+        if not self.vec_available:
+            return {}
+        rows = self.conn.execute(
+            "SELECT c.idx, v.embedding FROM chunk_vec v JOIN chunks c ON c.id = v.chunk_id WHERE c.video_id=?",
+            (video_id,)).fetchall()
+        return {r["idx"]: list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])) for r in rows}
+
     # ---------- vyhledávací primitiva (stejné rozhraní má PostgresDatabase) ----------
     backend = "sqlite"
 
@@ -338,4 +351,4 @@ def open_database(cfg, url: str | None = None):
     if url.startswith(("postgres://", "postgresql://")):
         from .db_postgres import PostgresDatabase
         return PostgresDatabase(url, cfg.gemini.embedding_dim)
-    return Database(cfg.db_path, cfg.gemini.embedding_dim)
+    return Database(url or cfg.db_path, cfg.gemini.embedding_dim)

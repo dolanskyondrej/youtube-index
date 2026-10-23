@@ -137,7 +137,14 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
         # skóre videa: nejlepší chunk + malý bonus za počet dalších zásahů
         score = best * (1 + 0.1 * math.log1p(len(chunks) - 1))
         matches = []
-        for r in chunks[:per_video_matches]:
+        taken: list[tuple[float, float]] = []
+        for r in chunks:
+            if len(matches) >= per_video_matches:
+                break
+            # sousední chunky se překrývají (overlap) – nezobrazovat dvakrát stejné místo
+            if any(r["start"] < e and r["end"] > s_ for s_, e in taken):
+                continue
+            taken.append((r["start"], r["end"]))
             plain, hl = _snippet(db, r["id"], q, r["text"])
             matches.append(Match(plain, hl, r["start"], r["end"], format_timestamp(r["start"]),
                                  _video_url(vid, r["start"])))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -255,6 +256,46 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_copy(args) -> int:
+    """Přenese index (kanál, videa, přepisy, chunky, embeddingy) do jiné DB, např. z lokálního SQLite do Cloud SQL."""
+    from .chunking import Chunk, Segment
+    from .db import open_database
+
+    cfg = load_config()
+    src = open_database(cfg, url=args.source) if args.source else open_database(cfg)
+    dst = open_database(cfg, url=args.to)
+    if src.embedding_dim != dst.embedding_dim:
+        print("Různá dimenze embeddingů – vektory se nepřenesou, spusť `ytindex embed` nad cílem.", file=sys.stderr)
+    ch = src.get_channel()
+    if not ch:
+        print("Zdrojová DB nemá kanál.", file=sys.stderr)
+        return 2
+    dst.upsert_channel(ch["id"], ch["name"], ch["url"], ch["input"] or "")
+    videos = src.list_videos(limit=10**6, order="position ASC")
+    with dst.tx():
+        for v in videos:
+            dst.upsert_video({k: v[k] for k in ("id", "channel_id", "title", "description", "published_at",
+                                                "duration_s", "view_count", "thumbnail_url", "position")})
+    done = [v for v in videos if v["transcript_status"] == "done"]
+    for i, v in enumerate(done, 1):
+        segs = [Segment(s["start"], s["duration"], s["text"]) for s in src.get_segments(v["id"])]
+        rows = src.fetch_chunks(list(src.chunk_ids(v["id"]).values()))
+        rows.sort(key=lambda r: r["start"])
+        chunks = [Chunk(r["start"], r["end"], r["text"]) for r in rows]
+        dst.store_transcript(v["id"], segs, chunks, v["transcript_source"], v["transcript_lang"])
+        if src.embedding_dim == dst.embedding_dim:
+            embs = src.get_embeddings(v["id"])
+            if embs:
+                ids = dst.chunk_ids(v["id"])
+                dst.store_embeddings([(ids[idx], vec) for idx, vec in embs.items() if idx in ids])
+        print(f"[{i}/{len(done)}] {v['id']} {len(segs)} seg, {len(chunks)} chunků", flush=True)
+    for v in videos:
+        if v["transcript_status"] in ("failed", "missing"):
+            dst.set_transcript_status(v["id"], v["transcript_status"], error=v["transcript_error"])
+    print("✔ Přeneseno:", json.dumps(dst.stats(), ensure_ascii=False))
+    return 0
+
+
 def cmd_mcp(args) -> int:
     from .mcp_server import build_mcp
 
@@ -265,7 +306,6 @@ def cmd_mcp(args) -> int:
 
 
 def cmd_stats(args) -> int:
-    import json
     from .db import open_database
 
     cfg = load_config()
@@ -317,6 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("cloud-serve", help="Cloud Run service: web + API + MCP s konfigurací z env")
     s.add_argument("--port", type=int, default=8000)
     s.set_defaults(fn=cmd_cloud_serve)
+
+    s = sub.add_parser("copy", help="přenese index do jiné DB (např. lokální SQLite → Cloud SQL)")
+    s.add_argument("--to", required=True, help="cílové DATABASE_URL (postgresql://…) nebo cesta k SQLite")
+    s.add_argument("--source", help="zdrojové DATABASE_URL / cesta (výchozí aktuální konfigurace)")
+    s.set_defaults(fn=cmd_copy)
 
     s = sub.add_parser("mcp", help="spustí MCP server (stdio) pro Claude Desktop / Claude Code")
     s.set_defaults(fn=cmd_mcp)

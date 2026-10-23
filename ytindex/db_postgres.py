@@ -240,6 +240,13 @@ class PostgresDatabase:
         row = self._one("SELECT COUNT(embedding) AS e, COUNT(*) AS c FROM chunks")
         return int(row["e"]), int(row["c"])
 
+    def chunk_ids(self, video_id: str) -> dict[int, int]:
+        return {r["idx"]: r["id"] for r in self._all("SELECT id, idx FROM chunks WHERE video_id=%s", (video_id,))}
+
+    def get_embeddings(self, video_id: str) -> dict[int, list[float]]:
+        rows = self._all("SELECT idx, embedding FROM chunks WHERE video_id=%s AND embedding IS NOT NULL", (video_id,))
+        return {r["idx"]: [float(x) for x in r["embedding"]] for r in rows}
+
     # ---------- vyhledávací primitiva ----------
     def fts_hits(self, q: str, mode: str, limit: int) -> list[tuple[int, float]]:
         tsq = build_tsquery(q, mode)
