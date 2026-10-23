@@ -9,15 +9,22 @@ _WORD = re.compile(r"[\w]+", re.UNICODE)
 # krátká stopslova: ve fulltextu jen přidávají šum (prefix "je"* najde "jenom", "jestli", …)
 STOPWORDS = set("""
 a i o u v k s z na do od po za ve ke se si je jsou být byl byla bylo to ten ta ty tu tam ale ani
-jako že co kdo jak proč kde kdy který která které jaký jaká jaké tento tato toto tak tím ani nebo
+jako že co kdo jak proč kde kdy který která které jaký jaká jaké jakým jakou tento tato toto tak tím nebo
 aby když už jen jenom také taky mi mě ti tě ho mu ji jí my vy oni ono ona on ne ano
-the a an of to in on is are was were be and or for with what why how who where when this that
+bez pro pod nad před mezi při podle proti kvůli přes bych bys bychom byste jsem jsi jsme jste
+něco nic někdo nikdo něj něho jeho její jejich svůj své tedy teda prostě vlastně
+the an of in is are was were be and or for with what why how who where when this that
 """.split())
 
 
+import unicodedata
+
+_STOP_FOLDED = {"".join(c for c in unicodedata.normalize("NFD", w) if unicodedata.category(c) != "Mn") for w in STOPWORDS}
+
+
 def _keep(word: str) -> bool:
-    w = word.lower()
-    return w not in STOPWORDS and (len(w) >= 3 or w.isdigit())
+    w = "".join(c for c in unicodedata.normalize("NFD", word.lower()) if unicodedata.category(c) != "Mn")
+    return w not in _STOP_FOLDED and (len(w) >= 3 or w.isdigit())
 
 
 def _parse(q: str) -> tuple[list[list[str]], list[str]]:

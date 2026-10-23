@@ -221,10 +221,14 @@ def fetch_gemini(video_id: str, cfg: Config, duration_s: int | None) -> Transcri
             required=["start", "text"],
         ),
     )
-    segments: list[Segment] = []
+    windows = []
     offset = 0
     while offset < total:
-        end = min(offset + window, total)
+        windows.append((offset, min(offset + window, total)))
+        offset = windows[-1][1]
+
+    def transcribe_window(bounds: tuple[int, int]) -> list[tuple[float, str]]:
+        offset, end = bounds
         part = types.Part(
             file_data=types.FileData(file_uri=url),
             video_metadata=types.VideoMetadata(start_offset=f"{offset}s", end_offset=f"{end}s",
@@ -245,15 +249,23 @@ def fetch_gemini(video_id: str, cfg: Config, duration_s: int | None) -> Transcri
         # model vrací časy absolutní (od začátku videa); pokud by byly relativní k oknu, přičteme offset
         rel = offset > 0 and all(t <= (end - offset) + 5 for t, _ in parsed)
         base = offset if rel else 0
-        prev = None
-        for k, (t, text) in enumerate(parsed):
-            start = t + base
-            if prev is not None and start < prev:   # monotónnost (model občas vrátí zpětný skok)
-                start = prev
-            nxt = parsed[k + 1][0] + base if k + 1 < len(parsed) else start + 10
-            segments.append(Segment(start, max(nxt - start, 1.0), text))
-            prev = start
-        offset = end
+        return [(t + base, x) for t, x in parsed]
+
+    # okna se přepisují souběžně (Gemini je I/O bound), výsledky se skládají v pořadí
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, cfg.gemini.concurrency)) as pool:
+        results = list(pool.map(transcribe_window, windows))
+
+    parsed = [item for chunk in results for item in chunk]
+    segments: list[Segment] = []
+    prev = None
+    for k, (t, text) in enumerate(parsed):
+        start = t
+        if prev is not None and start < prev:   # monotónnost (model občas vrátí zpětný skok)
+            start = prev
+        nxt = parsed[k + 1][0] if k + 1 < len(parsed) else start + 10
+        segments.append(Segment(start, max(nxt - start, 1.0), text))
+        prev = start
     return TranscriptResult(segments, "gemini", None) if segments else None
 
 

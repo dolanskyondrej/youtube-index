@@ -85,7 +85,8 @@ def _ensure_channel(cfg: Config, db) -> None:
 
 def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, skip_listing: bool = False,
                providers: list[str] | None = None, shard: tuple[int, int] | None = None, embed: bool = True,
-               ids: list[str] | None = None) -> int:
+               ids: list[str] | None = None, checkpoint=None, checkpoint_every: int = 5) -> int:
+    """checkpoint: callable() volaný po každých `checkpoint_every` zpracovaných videích (např. upload do GCS)."""
     from .chunking import chunk_segments, merge_segments
     from .transcripts import get_transcript
     from .youtube import enrich_with_data_api, list_channel_videos
@@ -147,6 +148,10 @@ def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, s
         db.store_transcript(v["id"], segs, chunks, res.source, res.lang)
         ok += 1
         print(f"[{i}/{len(todo)}] ✔ {v['id']} {v['title'][:60]} – {res.source}/{res.lang} {len(segs)} seg → {len(chunks)} chunků", flush=True)
+        if checkpoint and ok % checkpoint_every == 0:
+            if embed and cfg.gemini_api_key:
+                run_embed(cfg, db, quiet=True)
+            checkpoint()
         time.sleep(cfg.transcripts.request_delay)
     print(f"Hotovo: {ok} ok, {miss} bez transkriptu, {fail} chyb.")
     if embed and cfg.gemini_api_key:
@@ -199,14 +204,18 @@ def cmd_cloud_ingest(args) -> int:
         shard = (int(os.environ["CLOUD_RUN_TASK_INDEX"]), int(os.environ["CLOUD_RUN_TASK_COUNT"]))
     skip_listing = shard is not None and shard[0] != 0 and not args.limit  # seznam aktualizuje jen task 0
     limit = args.limit if args.limit is not None else (int(os.environ["YTINDEX_LIMIT"]) if os.environ.get("YTINDEX_LIMIT") else None)
-    rc = run_ingest(cfg, db, limit=limit, retry=args.retry, skip_listing=skip_listing,
-                    providers=providers, shard=shard, embed=not args.no_embed)
-    db.close()
+    checkpoint = None
     if gs:
         from .gcs import upload
 
-        upload(cfg.db_path, gs)
-        print(f"✔ Index nahrán do {gs}")
+        def checkpoint():
+            upload(cfg.db_path, gs)
+            print(f"  ✔ checkpoint: index nahrán do {gs}", flush=True)
+    rc = run_ingest(cfg, db, limit=limit, retry=args.retry, skip_listing=skip_listing,
+                    providers=providers, shard=shard, embed=not args.no_embed, checkpoint=checkpoint)
+    db.close()
+    if gs:
+        checkpoint()
     return rc
 
 
@@ -231,7 +240,7 @@ def cmd_embed(args) -> int:
     return run_embed(cfg, open_database(cfg, reset_on_mismatch=True))
 
 
-def run_embed(cfg: Config, db) -> int:
+def run_embed(cfg: Config, db, quiet: bool = False) -> int:
     from .embeddings import Embedder
 
     if not db.vec_available:
@@ -247,7 +256,10 @@ def run_embed(cfg: Config, db) -> int:
     db.conn.commit()
     emb = Embedder(cfg)
     done, total = db.count_embedded()
-    print(f"Embeddingy: {done}/{total} chunků hotovo, model {cfg.gemini.embedding_model} ({cfg.gemini.embedding_dim}d)")
+    if done == total:
+        return 0
+    if not quiet:
+        print(f"Embeddingy: {done}/{total} chunků hotovo, model {cfg.gemini.embedding_model} ({cfg.gemini.embedding_dim}d)")
     while True:
         rows = db.pending_embeddings(limit=256)
         if not rows:
@@ -255,8 +267,9 @@ def run_embed(cfg: Config, db) -> int:
         vecs = emb.embed_documents([r["text"] for r in rows])
         db.store_embeddings([(r["id"], v) for r, v in zip(rows, vecs)])
         done += len(rows)
-        print(f"  {done}/{total}", end="\r", flush=True)
-    print(f"\n✔ Embeddingy kompletní ({done}/{total}).")
+        if not quiet:
+            print(f"  {done}/{total}", end="\r", flush=True)
+    print(f"✔ Embeddingy kompletní ({done}/{total}).", flush=True)
     return 0
 
 

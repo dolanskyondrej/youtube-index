@@ -58,3 +58,10 @@ def test_hybrid_with_fake_embedder(db):
     # čistě vektorově
     hits = search(db, "vzdělávání", mode="vector", embed_query=emb)
     assert hits[0].video_id == "vid00000003"
+
+
+def test_manual_highlight_skips_stopwords():
+    from ytindex.search import _manual_highlight
+    out = _manual_highlight("Jakým způsobem děti bez trestů vychovávat", "jak vychovávat děti bez trestů")
+    assert "<mark>Jakým</mark>" not in out and "<mark>bez</mark>" not in out
+    assert "<mark>děti</mark>" in out and "<mark>trestů</mark>" in out and "<mark>vychovávat</mark>" in out

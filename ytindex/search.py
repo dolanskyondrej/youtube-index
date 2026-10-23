@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass, asdict
 
 from .chunking import format_timestamp
-from .query import build_fts_query  # noqa: F401  (re-export pro zpětnou kompatibilitu testů)
+from .query import STOPWORDS, build_fts_query  # noqa: F401  (re-export pro zpětnou kompatibilitu testů)
 
 RRF_K = 60
 # Gemini embeddingy mají plochou škálu podobností (relevantní ~0.70–0.75, nesmysl ~0.60–0.65), proto:
@@ -92,7 +92,9 @@ def _snippet(db, chunk_id: int, q: str, text: str, max_chars: int = 320) -> tupl
 
 
 def _manual_highlight(text: str, q: str) -> str:
-    words = [w for w in _WORD.findall(strip_diacritics(q).lower()) if len(w) >= 3]
+    # jen obsahová slova (stopslova by zvýraznila "jakým", "jakože" …)
+    words = [w for w in _WORD.findall(strip_diacritics(q).lower()) if len(w) >= 3 and w not in STOPWORDS
+             and strip_diacritics(w) not in {strip_diacritics(x) for x in STOPWORDS}]
     if not words:
         return text
     folded = strip_diacritics(text).lower()

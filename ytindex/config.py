@@ -36,6 +36,7 @@ class GeminiConfig:
     embedding_dim: int = 768
     transcribe_window_s: int = 600            # délka úseku videa pro jednu transkripční žádost (10 min ≈ 19k tokenů, ~13 s)
     transcribe_fps: float = 0.1               # málo snímků = levné; zajímá nás audio
+    concurrency: int = 4                      # kolik oken videa se přepisuje souběžně (rate limit → snížit)
 
 
 @dataclass
