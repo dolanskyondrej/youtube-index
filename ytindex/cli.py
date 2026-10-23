@@ -108,6 +108,24 @@ def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, s
                                  "description": v.description, "published_at": v.published_at,
                                  "duration_s": v.duration_s, "view_count": v.view_count,
                                  "thumbnail_url": v.thumbnail_url})
+        if cfg.youtube_api_key:
+            # výpis z cloudu bývá neúplný (YouTube blokuje další stránky) – doplň metadata všem videím bez data
+            from .youtube import VideoInfo
+            missing = [VideoInfo(id=r["id"], title=r["title"]) for r in db.list_videos(limit=10**6)
+                       if not r["published_at"]]
+            if missing:
+                print(f"  doplňuji datum publikace u {len(missing)} videí bez metadat …")
+                try:
+                    enrich_with_data_api(missing, cfg.youtube_api_key)
+                    with db.tx():
+                        for v in missing:
+                            if v.published_at:
+                                db.upsert_video({"id": v.id, "channel_id": cfg.channel.id, "title": v.title,
+                                                 "description": v.description, "published_at": v.published_at,
+                                                 "duration_s": v.duration_s, "view_count": v.view_count,
+                                                 "thumbnail_url": v.thumbnail_url})
+                except Exception as e:
+                    log.warning("Data API: %s", str(e)[:200])
 
     statuses = ["pending"] + (["failed", "missing"] if retry else [])
     todo = []
