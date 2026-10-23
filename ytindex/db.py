@@ -357,6 +357,26 @@ class Database:
         }
 
 
+class ReloadableDatabase:
+    """Obal nad Database, který umí za běhu vyměnit podkladovou DB (nový index stažený z GCS).
+
+    Všechna volání se delegují na aktuální instanci, takže API/MCP/search nic nepoznají.
+    """
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def swap(self, new_db) -> None:
+        old, self._db = self._db, new_db
+        try:
+            old.close()
+        except Exception:
+            pass
+
+
 def open_database(cfg, url: str | None = None, reset_on_mismatch: bool = False):
     """Factory: DATABASE_URL (postgresql://…) → Postgres + pgvector, jinak lokální SQLite."""
     import os

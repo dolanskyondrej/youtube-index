@@ -29,3 +29,17 @@ def test_api_endpoints(cfg, db):
     assert client.get("/").status_code == 200
     assert "openapi" in client.get("/openapi.json").json()
     assert client.options("/api/search", headers={"Origin": "https://x.example", "Access-Control-Request-Method": "GET"}).headers.get("access-control-allow-origin") == "*"
+
+
+def test_reloadable_database_swaps_underlying_db(cfg, db):
+    from fastapi.testclient import TestClient
+    from ytindex.api import create_app
+    from ytindex.db import Database, ReloadableDatabase
+    holder = ReloadableDatabase(db)
+    client = TestClient(create_app(cfg, holder))
+    assert client.get("/api/channel").json()["stats"]["videos"] == 3
+    other = Database(":memory:")
+    other.upsert_channel(cfg.channel.id, "Nový", "u")
+    holder.swap(other)
+    assert client.get("/api/channel").json()["name"] == "Nový"
+    assert client.get("/api/search", params={"q": "bitcoin"}).json()["total"] == 0

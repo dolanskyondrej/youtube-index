@@ -238,14 +238,46 @@ def cmd_cloud_ingest(args) -> int:
 
 
 def cmd_cloud_serve(args) -> int:
+    import threading
     import uvicorn
     from .api import create_app
-    from .db import open_database
+    from .db import ReloadableDatabase, open_database
 
     cfg = load_config()
-    _gcs_pull(cfg)
-    db = open_database(cfg)
+    gs = _gcs_pull(cfg)
+    db = ReloadableDatabase(open_database(cfg))
     _ensure_channel(cfg, db)
+
+    if gs:
+        # index se v bucketu mění během indexace – každých N minut zkontrolovat verzi a případně vyměnit
+        from .gcs import download, generation
+
+        interval = int(os.environ.get("YTINDEX_REFRESH_SECONDS", "300"))
+        state = {"gen": generation(gs)}
+
+        def refresher():
+            while True:
+                time.sleep(interval)
+                try:
+                    gen = generation(gs)
+                    if gen and gen != state["gen"]:
+                        new_path = f"{cfg.db_path}.{gen}"
+                        download(gs, new_path)
+                        new_db = open_database(cfg, url=new_path)
+                        old_path = db.path
+                        db.swap(new_db)
+                        state["gen"] = gen
+                        for suffix in ("", "-wal", "-shm"):
+                            try:
+                                os.remove(old_path + suffix)
+                            except OSError:
+                                pass
+                        print(f"✔ Index obnoven z {gs} (verze {gen}): {db.stats()['videos_by_status']}", flush=True)
+                except Exception as e:  # síť apod. – zkusit příště
+                    print(f"refresh indexu selhal: {str(e)[:200]}", flush=True)
+
+        threading.Thread(target=refresher, daemon=True, name="index-refresh").start()
+
     uvicorn.run(create_app(cfg, db), host="0.0.0.0", port=int(os.environ.get("PORT", args.port)), log_level="info",
                 proxy_headers=True, forwarded_allow_ips="*")
     return 0

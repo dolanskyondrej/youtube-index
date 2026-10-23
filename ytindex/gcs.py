@@ -21,6 +21,15 @@ def parse_gs(url: str) -> tuple[str, str]:
     return bucket, name
 
 
+def generation(gs_url: str) -> int | None:
+    """Číslo verze objektu v GCS (mění se při každém nahrání) – levná kontrola, zda je nový index."""
+    from google.cloud import storage
+
+    bucket, name = parse_gs(gs_url)
+    blob = storage.Client().bucket(bucket).get_blob(name)
+    return int(blob.generation) if blob else None
+
+
 def download(gs_url: str, local: str | os.PathLike) -> bool:
     """Stáhne objekt do local; vrací False, když v bucketu ještě není."""
     from google.cloud import storage
