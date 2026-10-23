@@ -16,6 +16,7 @@ from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
 from .db import open_database
+from .ratelimit import rate_limit_middleware
 from .research import answer as rag_answer, gather_context
 from .search import hit_to_dict, search
 
@@ -130,7 +131,7 @@ def _video_out(r) -> dict:
     }
 
 
-def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI:
+def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit: bool = True) -> FastAPI:
     cfg = cfg or load_config()
     db = db or open_database(cfg)
 
@@ -164,7 +165,9 @@ def create_app(cfg: Config | None = None, db: Database | None = None) -> FastAPI
     app.router.routes.append(Route("/mcp", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
     app.router.routes.append(Route("/mcp/", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"],
-                       allow_headers=["*"], expose_headers=["Mcp-Session-Id"])
+                       allow_headers=["*"], expose_headers=["Mcp-Session-Id", "Retry-After"])
+    if rate_limit:
+        app.middleware("http")(rate_limit_middleware)
 
     @lru_cache(maxsize=1)
     def embedder():

@@ -184,6 +184,13 @@ rámec jinak táhnou k úvodům videí). Mluvčí v přepisech není rozlišen, 
 | Claude Code (tento repozitář) | hotovo v `.mcp.json` (project scope) – po otevření repa se zeptá na schválení; jinde `claude mcp add --transport http ytindex https://<cloud-run-url>/mcp` |
 | Lokálně (stdio) | `claude mcp add ytindex -- ytindex mcp` (v adresáři s `ytindex.toml`) |
 
+## Limity API
+
+Token bucket per IP (z `X-Forwarded-For`) + globální strop na instanci; při překročení `429` s `Retry-After`.
+Nastavení v `ytindex/ratelimit.py`: `/api/ask` 6/min na IP (burst 3, globálně 30/min), `/api/context` 30/min,
+`/api/search` a `/mcp` 60/min (burst 20), ostatní `/api/*` 120/min. Smysl: hledání volá Gemini embedding dotazu
+a `/api/ask` generaci, limiter drží náklady pod kontrolou i při zneužití.
+
 ## Kde to provozovat (doporučení)
 
 - **Web + API:** jeden malý VPS/kontejner stačí (DB je SQLite soubor, dotaz trvá jednotky až desítky ms).

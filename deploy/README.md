@@ -41,6 +41,9 @@ Je idempotentní: další spuštění jen nasadí novou verzi.
   2 běhy za sebou (druhý naváže). Paralelní tasky (`--tasks N`) s SQLite v bucketu nepoužívat (jeden zapisovatel).
   Odhad ceny: Gemini ~75 USD + embeddingy ~2 USD + CPU jobu ~3 USD, jednorázově.
 
+**Pozor:** job nikdy nespouštět dvakrát souběžně (Cloud Scheduler + ruční spuštění). Oba běhy zpracovávají stejnou
+frontu, práci zdvojují a platí se dvakrát. Plánovač zapínej až po doběhnutí ručního běhu.
+
 Služba po nahrání nového indexu začne nový index používat, jakmile se vytvoří nová instance (škáluje na 0, tj.
 po ~15 min klidu). Vynutit ihned: `gcloud run services update ytindex --region europe-west1 --update-env-vars INDEX_VERSION=$(date +%s)`.
 
