@@ -235,7 +235,7 @@ def collect(cfg: Config, db, wait: bool = False, poll_s: int = 120, on_video=Non
 
 
 def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite"),
-              shift_s: int = 20) -> dict:
+              shift_s: int = 20, concurrency: int = 4) -> dict:
     """Videa se zápisem gaps:[…] v transcript_error: chybějící okna zkusí online, s posunutými hranicemi
     (RECITATION/PROHIBITED_CONTENT bývá vázané na konkrétní výřez) a s náhradním modelem."""
     from google.genai import types
@@ -246,16 +246,22 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
     schema = types.Schema(type=types.Type.ARRAY, items=types.Schema(
         type=types.Type.OBJECT, properties={"start": types.Schema(type=types.Type.STRING), "text": types.Schema(type=types.Type.STRING)},
         required=["start", "text"]))
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     rows = db.conn.execute("SELECT id, transcript_error FROM videos WHERE transcript_status='done' AND transcript_error LIKE 'gaps:%'").fetchall()
     summary = {"videos": len(rows), "windows": 0, "filled": 0, "still_missing": 0}
-    out_of_credit = False
-    for row in rows:
+    state = {"out_of_credit": False}
+    lock = threading.Lock()
+
+    def process_video(row):
+        nonlocal_summary = {"windows": 0, "filled": 0, "still_missing": 0}
         vid = row["id"]
         try:
             gaps = json.loads(row["transcript_error"][5:])
         except json.JSONDecodeError:
             log.warning("%s: nečitelný záznam mezer, přeskočeno (opraví nové `batch collect`)", vid)
-            continue
+            return nonlocal_summary
         remaining = []
         new_items: list[tuple[float, str]] = []
 
@@ -276,10 +282,10 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             return None, (r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď")
 
         for start, end, reason in gaps:
-            summary["windows"] += 1
-            if out_of_credit:
+            nonlocal_summary["windows"] += 1
+            if state["out_of_credit"]:
                 remaining.append([start, end, "402 kredit"])
-                summary["still_missing"] += 1
+                nonlocal_summary["still_missing"] += 1
                 continue
             mid = (start + end) // 2
             # strategie od nejlevnější: posunuté okno (levný model) → dvě poloviny (odmítnutí bývá lokální)
@@ -297,7 +303,7 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                     except Exception as e:
                         why, items = str(e)[:40], None
                         if "402" in why:
-                            out_of_credit = True
+                            state["out_of_credit"] = True
                             print("  ✖ Gemini: vyčerpaný kredit (402) – končím", flush=True)
                             break
                         if "429" in why:
@@ -306,7 +312,7 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                         reason = why
                         break
                     got += items
-                if out_of_credit:
+                if state["out_of_credit"]:
                     got = []
                     break
                 if got and not reason:
@@ -314,20 +320,27 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                 got = []
             if got:
                 new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]
-                summary["filled"] += 1
+                nonlocal_summary["filled"] += 1
             else:
                 remaining.append([start, end, reason or "402 kredit"])
-                summary["still_missing"] += 1
-        if new_items:
-            old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)]
-            merged = sorted(old + new_items, key=lambda p: p[0])
-            segs = merge_segments(assemble_segments(merged))
-            chunks = chunk_segments(segs, cfg.chunking.target_chars, cfg.chunking.max_seconds, cfg.chunking.overlap_segments)
-            db.store_transcript(vid, segs, chunks, "gemini-batch", None)
-        db.set_transcript_status(vid, "done", source="gemini-batch",
-                                 error=("gaps:" + json.dumps(remaining)) if remaining else None)
-        if not out_of_credit or new_items:
+                nonlocal_summary["still_missing"] += 1
+        with lock:
+            if new_items:
+                old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)]
+                merged = sorted(old + new_items, key=lambda p: p[0])
+                segs = merge_segments(assemble_segments(merged))
+                chunks = chunk_segments(segs, cfg.chunking.target_chars, cfg.chunking.max_seconds, cfg.chunking.overlap_segments)
+                db.store_transcript(vid, segs, chunks, "gemini-batch", None)
+            db.set_transcript_status(vid, "done", source="gemini-batch",
+                                     error=("gaps:" + json.dumps(remaining)) if remaining else None)
+        if not state["out_of_credit"] or new_items:
             print(f"  {vid}: doplněno {len(gaps) - len(remaining)}/{len(gaps)} oken", flush=True)
+        return nonlocal_summary
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        for part in pool.map(process_video, rows):
+            for k, v in part.items():
+                summary[k] += v
     return summary
 
 
