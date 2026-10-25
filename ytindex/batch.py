@@ -190,7 +190,7 @@ def collect(cfg: Config, db, wait: bool = False, poll_s: int = 120, on_video=Non
             for w, r in zip(windows, responses):
                 reason = None
                 if r.response is None:
-                    reason = str(r.error)[:80] if r.error else "bez odpovědi"
+                    reason = str(r.error)[:40] if r.error else "bez odpovědi"
                 elif not r.response.text:
                     cand = r.response.candidates[0] if r.response.candidates else None
                     reason = cand.finish_reason.name if cand and cand.finish_reason else "prázdná odpověď"
@@ -270,9 +270,14 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                             break
                     reason = r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď"
                 except Exception as e:
-                    reason = str(e)[:80]
+                    reason = str(e)[:40]
                     if "429" in reason:
                         time.sleep(30)
+                    if "402" in reason:          # vyčerpaný kredit – nemá smysl pokračovat
+                        print("  ✖ Gemini: vyčerpaný kredit (402) – končím, zbytek doplní další běh fill-gaps", flush=True)
+                        remaining += [[s_, e_, "402 kredit"] for s_, e_, _ in gaps[len(remaining) + len([1 for _ in []]):]] if False else []
+                        got = None
+                        break
             if got:
                 # jen část v původní mezeře (posunuté okraje už máme z vedlejších oken)
                 new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]

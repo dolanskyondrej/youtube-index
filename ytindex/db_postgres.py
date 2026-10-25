@@ -212,7 +212,7 @@ class PostgresDatabase:
         with self.tx() as c:
             c.execute("UPDATE videos SET transcript_status=%s, transcript_source=%s, transcript_lang=%s, "
                       "transcript_error=%s, updated_at=now() WHERE id=%s",
-                      (status, source, lang, (error or "")[:500] or None, video_id))
+                      (status, source, lang, (error if (error or "").startswith("gaps:") else (error or "")[:500]) or None, video_id))
 
     # ---------- transcripts ----------
     def store_transcript(self, video_id: str, segments: list[Segment], chunks: list[Chunk],

@@ -219,7 +219,7 @@ class Database:
             c.execute(
                 "UPDATE videos SET transcript_status=?, transcript_source=?, transcript_lang=?, "
                 "transcript_error=?, updated_at=datetime('now') WHERE id=?",
-                (status, source, lang, (error or "")[:500] or None, video_id),
+                (status, source, lang, (error if (error or "").startswith("gaps:") else (error or "")[:500]) or None, video_id),
             )
 
     # ---------- transcripts ----------
