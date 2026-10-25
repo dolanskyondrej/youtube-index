@@ -31,7 +31,7 @@ class TranscriptConfig:
 
 @dataclass
 class GeminiConfig:
-    model: str = "gemini-3.5-flash-lite"      # model pro transkripci videí bez titulků
+    model: str = "gemini-3.1-flash-lite"      # model pro transkripci (A/B test: věrnější a levnější než 3.5-flash-lite)
     answer_model: str = "gemini-3.5-flash"     # model pro odpovědi s citacemi (/api/ask, MCP ask_channel)
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768

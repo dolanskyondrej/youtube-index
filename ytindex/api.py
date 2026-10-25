@@ -232,7 +232,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
 
     @app.get("/api/videos", response_model=VideoListOut)
     def videos(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=200),
-               status: str | None = Query("done", pattern="^(pending|done|missing|failed|all)$",
+               status: str | None = Query("done", pattern="^(pending|queued|done|missing|failed|all)$",
                                           description="Výchozí jen videa s transkriptem (done); all = všechna"),
                order: str = Query("published_at DESC")):
         st = None if status == "all" else status
