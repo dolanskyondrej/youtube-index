@@ -258,39 +258,65 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             continue
         remaining = []
         new_items: list[tuple[float, str]] = []
+
+        def transcribe(model: str, a: int, b: int):
+            """→ (položky | None, důvod)"""
+            part = types.Part(file_data=types.FileData(file_uri=f"https://www.youtube.com/watch?v={vid}"),
+                              video_metadata=types.VideoMetadata(start_offset=f"{a}s", end_offset=f"{b}s", fps=cfg.gemini.transcribe_fps))
+            r = client.models.generate_content(
+                model=model, contents=[types.Content(role="user", parts=[part, types.Part(text=_TRANSCRIBE_PROMPT)])],
+                config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=0.0))
+            if r.text:
+                try:
+                    items = parse_window_items(json.loads(r.text), a, b)
+                except json.JSONDecodeError:
+                    return None, "nevalidní JSON"
+                if items:
+                    return items, ""
+            return None, (r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď")
+
         for start, end, reason in gaps:
             summary["windows"] += 1
             if out_of_credit:
                 remaining.append([start, end, "402 kredit"])
                 summary["still_missing"] += 1
                 continue
-            got = None
-            for model in models:
-                a, b = max(0, start - shift_s), end + shift_s
-                part = types.Part(file_data=types.FileData(file_uri=f"https://www.youtube.com/watch?v={vid}"),
-                                  video_metadata=types.VideoMetadata(start_offset=f"{a}s", end_offset=f"{b}s", fps=cfg.gemini.transcribe_fps))
-                try:
-                    r = client.models.generate_content(
-                        model=model, contents=[types.Content(role="user", parts=[part, types.Part(text=_TRANSCRIBE_PROMPT)])],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=0.0))
-                    if r.text:
-                        got = parse_window_items(json.loads(r.text), a, b)
-                        if got:
+            mid = (start + end) // 2
+            # strategie od nejlevnější: posunuté okno (levný model) → dvě poloviny (odmítnutí bývá lokální)
+            # → posunuté okno náhradním modelem
+            strategies = [(models[0], [(max(0, start - shift_s), end + shift_s)]),
+                          (models[0], [(max(0, start - shift_s), mid + 5), (mid - 5, end + shift_s)])]
+            if len(models) > 1:
+                strategies.append((models[1], [(max(0, start - shift_s), end + shift_s)]))
+            got: list[tuple[float, str]] = []
+            for model, pieces in strategies:
+                got, reason = [], ""
+                for a, b in pieces:
+                    try:
+                        items, why = transcribe(model, a, b)
+                    except Exception as e:
+                        why, items = str(e)[:40], None
+                        if "402" in why:
+                            out_of_credit = True
+                            print("  ✖ Gemini: vyčerpaný kredit (402) – končím", flush=True)
                             break
-                    reason = r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď"
-                except Exception as e:
-                    reason = str(e)[:40]
-                    if "402" in reason:          # vyčerpaný kredit – zbytek doplní další běh
-                        out_of_credit = True
-                        print("  ✖ Gemini: vyčerpaný kredit (402) – končím", flush=True)
+                        if "429" in why:
+                            time.sleep(30)
+                    if items is None:
+                        reason = why
                         break
-                    if "429" in reason:
-                        time.sleep(30)
+                    got += items
+                if out_of_credit:
+                    got = []
+                    break
+                if got and not reason:
+                    break
+                got = []
             if got:
                 new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]
                 summary["filled"] += 1
             else:
-                remaining.append([start, end, reason])
+                remaining.append([start, end, reason or "402 kredit"])
                 summary["still_missing"] += 1
         if new_items:
             old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)]
