@@ -248,13 +248,22 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
         required=["start", "text"]))
     rows = db.conn.execute("SELECT id, transcript_error FROM videos WHERE transcript_status='done' AND transcript_error LIKE 'gaps:%'").fetchall()
     summary = {"videos": len(rows), "windows": 0, "filled": 0, "still_missing": 0}
+    out_of_credit = False
     for row in rows:
         vid = row["id"]
-        gaps = json.loads(row["transcript_error"][5:])
+        try:
+            gaps = json.loads(row["transcript_error"][5:])
+        except json.JSONDecodeError:
+            log.warning("%s: nečitelný záznam mezer, přeskočeno (opraví nové `batch collect`)", vid)
+            continue
         remaining = []
         new_items: list[tuple[float, str]] = []
         for start, end, reason in gaps:
             summary["windows"] += 1
+            if out_of_credit:
+                remaining.append([start, end, "402 kredit"])
+                summary["still_missing"] += 1
+                continue
             got = None
             for model in models:
                 a, b = max(0, start - shift_s), end + shift_s
@@ -271,15 +280,13 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                     reason = r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď"
                 except Exception as e:
                     reason = str(e)[:40]
+                    if "402" in reason:          # vyčerpaný kredit – zbytek doplní další běh
+                        out_of_credit = True
+                        print("  ✖ Gemini: vyčerpaný kredit (402) – končím", flush=True)
+                        break
                     if "429" in reason:
                         time.sleep(30)
-                    if "402" in reason:          # vyčerpaný kredit – nemá smysl pokračovat
-                        print("  ✖ Gemini: vyčerpaný kredit (402) – končím, zbytek doplní další běh fill-gaps", flush=True)
-                        remaining += [[s_, e_, "402 kredit"] for s_, e_, _ in gaps[len(remaining) + len([1 for _ in []]):]] if False else []
-                        got = None
-                        break
             if got:
-                # jen část v původní mezeře (posunuté okraje už máme z vedlejších oken)
                 new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]
                 summary["filled"] += 1
             else:
@@ -293,7 +300,8 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             db.store_transcript(vid, segs, chunks, "gemini-batch", None)
         db.set_transcript_status(vid, "done", source="gemini-batch",
                                  error=("gaps:" + json.dumps(remaining)) if remaining else None)
-        print(f"  {vid}: doplněno {len(gaps) - len(remaining)}/{len(gaps)} oken" + (f", zůstává {remaining}" if remaining else ""), flush=True)
+        if not out_of_credit or new_items:
+            print(f"  {vid}: doplněno {len(gaps) - len(remaining)}/{len(gaps)} oken", flush=True)
     return summary
 
 
