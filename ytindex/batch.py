@@ -186,40 +186,109 @@ def collect(cfg: Config, db, wait: bool = False, poll_s: int = 120, on_video=Non
                 continue
             responses = list(job.dest.inlined_responses or [])
             per_video: dict[str, list[tuple[float, str]]] = {}
-            failed: dict[str, str] = {}
+            gaps: dict[str, list[list]] = {}      # video → [[start, end, důvod], …] oken bez textu
             for w, r in zip(windows, responses):
-                if r.response is None or not r.response.text:
-                    failed[w.video_id] = str(r.error)[:200] if r.error else "prázdná odpověď"
+                reason = None
+                if r.response is None:
+                    reason = str(r.error)[:80] if r.error else "bez odpovědi"
+                elif not r.response.text:
+                    cand = r.response.candidates[0] if r.response.candidates else None
+                    reason = cand.finish_reason.name if cand and cand.finish_reason else "prázdná odpověď"
+                if reason:
+                    gaps.setdefault(w.video_id, []).append([w.start, w.end, reason])
                     continue
                 try:
                     items = json.loads(r.response.text)
                 except json.JSONDecodeError:
-                    items = []
+                    gaps.setdefault(w.video_id, []).append([w.start, w.end, "nevalidní JSON"])
+                    continue
                 per_video.setdefault(w.video_id, []).extend(parse_window_items(items, w.start, w.end))
             for vid in {w.video_id for w in windows}:
-                if vid in failed:
-                    db.set_transcript_status(vid, "failed", error=f"batch okno: {failed[vid]}")
-                    summary["videos_failed"] += 1
-                    continue
+                v = db.get_video(vid)
+                if v and v["transcript_status"] == "done" and v["transcript_source"] != "gemini-batch":
+                    continue   # mezitím hotové jinou cestou
                 segs = merge_segments(assemble_segments(per_video.get(vid, [])))
                 if not segs:
-                    db.set_transcript_status(vid, "missing")
+                    reasons = {g[2] for g in gaps.get(vid, [])}
+                    db.set_transcript_status(vid, "failed", error="batch: všechna okna bez textu: " + ", ".join(sorted(reasons)))
                     summary["videos_failed"] += 1
                     continue
                 chunks = chunk_segments(segs, cfg.chunking.target_chars, cfg.chunking.max_seconds, cfg.chunking.overlap_segments)
                 db.store_transcript(vid, segs, chunks, "gemini-batch", None)
+                if gaps.get(vid):
+                    # uložit s mezerami; doplní je `ytindex batch fill-gaps` (online, posunutá okna / jiný model)
+                    db.set_transcript_status(vid, "done", source="gemini-batch", error="gaps:" + json.dumps(gaps[vid]))
+                    summary["videos_with_gaps"] = summary.get("videos_with_gaps", 0) + 1
                 summary["videos_done"] += 1
                 if on_video:
                     on_video(vid, len(segs), len(chunks))
             with db.tx() as c:
                 c.execute("UPDATE batch_jobs SET state='collected', collected_at=datetime('now') WHERE name=?", (row["name"],))
             summary["jobs_collected"] += 1
-            print(f"  ✔ {row['name']}: {len({w.video_id for w in windows}) - len(failed)} videí uloženo, {len(failed)} selhalo", flush=True)
+            print(f"  ✔ {row['name']}: {len({w.video_id for w in windows})} videí, z toho {len(gaps)} s mezerami", flush=True)
         summary["jobs_waiting"] = waiting
         if not waiting or not wait:
             break
         print(f"  … čeká {waiting} dávek, další kontrola za {poll_s} s", flush=True)
         time.sleep(poll_s)
+    return summary
+
+
+def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite"),
+              shift_s: int = 20) -> dict:
+    """Videa se zápisem gaps:[…] v transcript_error: chybějící okna zkusí online, s posunutými hranicemi
+    (RECITATION/PROHIBITED_CONTENT bývá vázané na konkrétní výřez) a s náhradním modelem."""
+    from google.genai import types
+
+    from .chunking import chunk_segments, merge_segments
+
+    client = _client(cfg)
+    schema = types.Schema(type=types.Type.ARRAY, items=types.Schema(
+        type=types.Type.OBJECT, properties={"start": types.Schema(type=types.Type.STRING), "text": types.Schema(type=types.Type.STRING)},
+        required=["start", "text"]))
+    rows = db.conn.execute("SELECT id, transcript_error FROM videos WHERE transcript_status='done' AND transcript_error LIKE 'gaps:%'").fetchall()
+    summary = {"videos": len(rows), "windows": 0, "filled": 0, "still_missing": 0}
+    for row in rows:
+        vid = row["id"]
+        gaps = json.loads(row["transcript_error"][5:])
+        remaining = []
+        new_items: list[tuple[float, str]] = []
+        for start, end, reason in gaps:
+            summary["windows"] += 1
+            got = None
+            for model in models:
+                a, b = max(0, start - shift_s), end + shift_s
+                part = types.Part(file_data=types.FileData(file_uri=f"https://www.youtube.com/watch?v={vid}"),
+                                  video_metadata=types.VideoMetadata(start_offset=f"{a}s", end_offset=f"{b}s", fps=cfg.gemini.transcribe_fps))
+                try:
+                    r = client.models.generate_content(
+                        model=model, contents=[types.Content(role="user", parts=[part, types.Part(text=_TRANSCRIBE_PROMPT)])],
+                        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=schema, temperature=0.0))
+                    if r.text:
+                        got = parse_window_items(json.loads(r.text), a, b)
+                        if got:
+                            break
+                    reason = r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď"
+                except Exception as e:
+                    reason = str(e)[:80]
+                    if "429" in reason:
+                        time.sleep(30)
+            if got:
+                # jen část v původní mezeře (posunuté okraje už máme z vedlejších oken)
+                new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]
+                summary["filled"] += 1
+            else:
+                remaining.append([start, end, reason])
+                summary["still_missing"] += 1
+        if new_items:
+            old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)]
+            merged = sorted(old + new_items, key=lambda p: p[0])
+            segs = merge_segments(assemble_segments(merged))
+            chunks = chunk_segments(segs, cfg.chunking.target_chars, cfg.chunking.max_seconds, cfg.chunking.overlap_segments)
+            db.store_transcript(vid, segs, chunks, "gemini-batch", None)
+        db.set_transcript_status(vid, "done", source="gemini-batch",
+                                 error=("gaps:" + json.dumps(remaining)) if remaining else None)
+        print(f"  {vid}: doplněno {len(gaps) - len(remaining)}/{len(gaps)} oken" + (f", zůstává {remaining}" if remaining else ""), flush=True)
     return summary
 
 

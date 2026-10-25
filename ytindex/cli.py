@@ -368,6 +368,15 @@ def cmd_batch(args) -> int:
             print(f"{j['state']:10s} {j['name']}  {j['model']}  {j['windows']} oken  {j['created_at']}  {j['error'] or ''}")
         print(json.dumps(db.stats()["videos_by_status"], ensure_ascii=False))
         return 0
+    if args.action == "fill-gaps":
+        summary = batch.fill_gaps(cfg, db)
+        print("Batch fill-gaps:", json.dumps(summary, ensure_ascii=False))
+        if summary["filled"] and not args.no_embed and cfg.gemini_api_key:
+            run_embed(cfg, db)
+        if gs and summary["filled"]:
+            from .gcs import upload
+            upload(cfg.db_path, gs)
+        return 0
     if args.action == "submit":
         if not cfg.gemini_api_key:
             print("Chybí GEMINI_API_KEY", file=sys.stderr); return 2
@@ -499,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_cloud_serve)
 
     s = sub.add_parser("batch", help="přepis přes Gemini Batch API za poloviční cenu: submit | collect | status")
-    s.add_argument("action", choices=["submit", "collect", "status"])
+    s.add_argument("action", choices=["submit", "collect", "fill-gaps", "status"])
     s.add_argument("--model", help="např. gemini-3.1-flash-lite (výchozí z konfigurace)")
     s.add_argument("--limit", type=int, help="submit: jen N videí (test)")
     s.add_argument("--ids", help="submit: jen tato video ID")
