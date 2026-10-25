@@ -40,16 +40,17 @@ class Embedder:
         else:
             prefix = "task: search result | query: " if task == "RETRIEVAL_QUERY" else "title: none | text: "
             contents = [prefix + x for x in texts]
-        for attempt in range(6):
+        # spend-based limit Gemini je okno 10 minut → trpělivě čekat (max ~1 h), ne vzdát se po pár minutách
+        for attempt in range(14):
             try:
                 res = self.client.models.embed_content(model=self.model, contents=contents,
                                                        config=t.EmbedContentConfig(**kwargs))
                 return [_normalize(e.values) for e in res.embeddings]
             except Exception as e:
                 msg = str(e)
-                if attempt == 5 or not any(x in msg for x in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
+                if attempt == 13 or not any(x in msg for x in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE")):
                     raise
-                wait = 5 * (2 ** attempt)
+                wait = min(300, 5 * (2 ** attempt))
                 log.warning("Embeddings: %s – čekám %ds", msg[:100], wait)
                 time.sleep(wait)
         return []
