@@ -264,6 +264,7 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             return nonlocal_summary
         remaining = []
         new_items: list[tuple[float, str]] = []
+        filled_flags: list[bool] = []
 
         def transcribe(model: str, a: int, b: int):
             """→ (položky | None, důvod)"""
@@ -286,6 +287,7 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             if state["out_of_credit"]:
                 remaining.append([start, end, "402 kredit"])
                 nonlocal_summary["still_missing"] += 1
+                filled_flags.append(False)
                 continue
             mid = (start + end) // 2
             # strategie od nejlevnější: posunuté okno (levný model) → dvě poloviny (odmítnutí bývá lokální)
@@ -321,12 +323,16 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             if got:
                 new_items += [(t, x) for t, x in got if start - 5 <= t < end + 5]
                 nonlocal_summary["filled"] += 1
+                filled_flags.append(True)
             else:
                 remaining.append([start, end, reason or "402 kredit"])
                 nonlocal_summary["still_missing"] += 1
+                filled_flags.append(False)
         with lock:
             if new_items:
-                old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)]
+                filled = [(a, b) for (a, b, _), ok in zip(gaps, filled_flags) if ok]
+                old = [(float(s["start"]), s["text"]) for s in db.get_segments(vid)
+                       if not any(a <= float(s["start"]) < b for a, b in filled)]   # staré (zacyklené/prázdné) pryč
                 merged = sorted(old + new_items, key=lambda p: p[0])
                 segs = merge_segments(assemble_segments(merged))
                 chunks = chunk_segments(segs, cfg.chunking.target_chars, cfg.chunking.max_seconds, cfg.chunking.overlap_segments)

@@ -404,6 +404,28 @@ def cmd_batch(args) -> int:
     return 0
 
 
+def cmd_quality(args) -> int:
+    """Najde zacyklené přepisy (stejné slovo/fráze opakovaně) a volitelně je označí k novému přepisu."""
+    from . import quality
+    from .db import open_database
+
+    cfg = load_config()
+    db = open_database(cfg)
+    res = quality.scan(db, min_word_repeats=args.min_word, min_phrase_repeats=args.min_phrase)
+    print(f"Prohledáno {res['videos_scanned']} videí: zasaženo {res['videos_hit']} videí, {res['windows']} oken "
+          f"({res['hours']} h), {res['loops']} smyček; podle zdroje: {json.dumps(res['by_source'], ensure_ascii=False)}")
+    for d in sorted(res["details"], key=lambda d: -len(d["windows"]))[: args.show]:
+        print(f"  {d['video_id']} [{d['source']}] {len(d['windows'])} oken, {d['loops']} smyček, např. {d['example']} | {d['title'][:50]}")
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=1)
+        print(f"detail zapsán do {args.json}")
+    if args.mark:
+        n = quality.mark(db, res["details"])
+        print(f"✔ Označeno {n} oken jako mezery → `ytindex batch fill-gaps` je znovu přepíše.")
+    return 0
+
+
 def cmd_copy(args) -> int:
     """Přenese index (kanál, videa, přepisy, chunky, embeddingy) do jiné DB, např. z lokálního SQLite do Cloud SQL."""
     from .chunking import Chunk, Segment
@@ -517,6 +539,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-embed", action="store_true")
     s.add_argument("--gcs", action="store_true", help="pracovat s indexem v YTINDEX_GCS_DB (stáhnout před, nahrát po)")
     s.set_defaults(fn=cmd_batch)
+
+    s = sub.add_parser("quality", help="kontrola přepisů: zacyklená slova/fráze; --mark označí okna k novému přepisu")
+    s.add_argument("action", choices=["scan"])
+    s.add_argument("--min-word", type=int, default=8, help="min. počet stejných slov za sebou (výchozí 8; 3–6 bývá běžná řeč „jo jo jo“)")
+    s.add_argument("--min-phrase", type=int, default=8, help="min. počet opakování fráze 2–8 slov (výchozí 8)")
+    s.add_argument("--show", type=int, default=15, help="kolik nejhorších videí vypsat")
+    s.add_argument("--json", help="zapsat detail do souboru")
+    s.add_argument("--mark", action="store_true", help="označit zasažená okna jako mezery (gaps) k novému přepisu")
+    s.set_defaults(fn=cmd_quality)
 
     s = sub.add_parser("copy", help="přenese index do jiné DB (např. lokální SQLite → Cloud SQL)")
     s.add_argument("--to", required=True, help="cílové DATABASE_URL (postgresql://…) nebo cesta k SQLite")
