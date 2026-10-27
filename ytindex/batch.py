@@ -235,7 +235,7 @@ def collect(cfg: Config, db, wait: bool = False, poll_s: int = 120, on_video=Non
 
 
 def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite"),
-              shift_s: int = 20, concurrency: int = 4) -> dict:
+              shift_s: int = 20, concurrency: int = 4, only_reason: str | None = None) -> dict:
     """Videa se zápisem gaps:[…] v transcript_error: chybějící okna zkusí online, s posunutými hranicemi
     (RECITATION/PROHIBITED_CONTENT bývá vázané na konkrétní výřez) a s náhradním modelem."""
     from google.genai import types
@@ -283,6 +283,10 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
             return None, (r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď")
 
         for start, end, reason in gaps:
+            if only_reason and reason != only_reason:
+                remaining.append([start, end, reason])   # jiný důvod – nechat beze změny, bez volání API
+                filled_flags.append(False)
+                continue
             nonlocal_summary["windows"] += 1
             if state["out_of_credit"]:
                 remaining.append([start, end, "402 kredit"])
@@ -339,7 +343,7 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                 db.store_transcript(vid, segs, chunks, "gemini-batch", None)
             db.set_transcript_status(vid, "done", source="gemini-batch",
                                      error=("gaps:" + json.dumps(remaining)) if remaining else None)
-        if not state["out_of_credit"] or new_items:
+        if nonlocal_summary["windows"] and (not state["out_of_credit"] or new_items):
             print(f"  {vid}: doplněno {len(gaps) - len(remaining)}/{len(gaps)} oken", flush=True)
         return nonlocal_summary
 

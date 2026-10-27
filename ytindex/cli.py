@@ -369,7 +369,7 @@ def cmd_batch(args) -> int:
         print(json.dumps(db.stats()["videos_by_status"], ensure_ascii=False))
         return 0
     if args.action == "fill-gaps":
-        summary = batch.fill_gaps(cfg, db)
+        summary = batch.fill_gaps(cfg, db, only_reason=args.reason)
         print("Batch fill-gaps:", json.dumps(summary, ensure_ascii=False))
         if summary["filled"] and not args.no_embed and cfg.gemini_api_key:
             run_embed(cfg, db)
@@ -538,6 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--poll", type=int, default=120, help="collect --wait: interval kontroly v sekundách")
     s.add_argument("--no-embed", action="store_true")
     s.add_argument("--gcs", action="store_true", help="pracovat s indexem v YTINDEX_GCS_DB (stáhnout před, nahrát po)")
+    s.add_argument("--reason", help="fill-gaps: doplnit jen mezery s tímto důvodem (např. loop)")
     s.set_defaults(fn=cmd_batch)
 
     s = sub.add_parser("quality", help="kontrola přepisů: zacyklená slova/fráze; --mark označí okna k novému přepisu")
