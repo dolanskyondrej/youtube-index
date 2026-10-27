@@ -74,6 +74,20 @@ Embeddingy se počítají automaticky, pokud je `GEMINI_API_KEY` (`--no-embed` v
 
 Docker: `docker compose up -d` (servíruje hotový `data/index.sqlite` + `ytindex.toml`).
 
+## Batch přepis a kontrola kvality
+
+```bash
+ytindex batch submit              # videa bez přepisu → Gemini Batch API (poloviční cena), dávky po ≤400 oknech
+ytindex batch collect --wait      # vyzvedne hotové dávky, uloží přepisy (i částečné – chybějící okna jako „gaps“)
+ytindex batch fill-gaps [--reason loop]   # chybějící/odmítnutá okna online: posunuté okno → poloviny → náhradní model
+ytindex batch status
+ytindex quality scan [--mark]     # zacyklené přepisy (stejné slovo/fráze 8+ za sebou); --mark je označí k novému přepisu
+```
+
+Poznatky z celého kanálu: Gemini účtuje vstupní audio i u oken, která pak odmítne (RECITATION), a při
+`temperature=0` umí v okně zacyklit (jedno slovo tisíckrát) – proto kontrola kvality a opakování s jinými hranicemi.
+Nikdy nespouštět dva ingest/batch běhy nad stejným indexem souběžně.
+
 ## API (kontrakt pro libovolný frontend)
 
 Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat TypeScript/Swift klienty).
