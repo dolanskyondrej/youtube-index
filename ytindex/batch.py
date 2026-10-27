@@ -279,6 +279,11 @@ def fill_gaps(cfg: Config, db, models: tuple[str, ...] = ("gemini-3.1-flash-lite
                 except json.JSONDecodeError:
                     return None, "nevalidní JSON"
                 if items:
+                    # zacyklený výstup (stejné slovo/fráze mnohokrát) = neúspěch → další strategie
+                    from .quality import find_loops
+                    words = [w for _, t in items for w in t.lower().split()]
+                    if find_loops(words, min_word_repeats=20, min_phrase_repeats=20):
+                        return None, "loop"
                     return items, ""
             return None, (r.candidates[0].finish_reason.name if r.candidates and r.candidates[0].finish_reason else "prázdná odpověď")
 
