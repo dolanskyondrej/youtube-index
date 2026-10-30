@@ -5,6 +5,7 @@ Stav je v paměti instance (Cloud Run má max. 2 instance, takže reálný limit
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -67,8 +68,11 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+_VER = re.compile(r"^/api/v\d+/")
+
+
 async def rate_limit_middleware(request: Request, call_next):
-    path = request.url.path
+    path = _VER.sub("/api/", request.url.path)   # pravidla platí pro všechny verze API
     for prefix, per_ip, global_ in RULES:
         if path.startswith(prefix):
             ok, retry = per_ip.allow(client_ip(request))

@@ -5,10 +5,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,9 +26,17 @@ from .search import hit_to_dict, search
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 
+API_VERSIONS = [1]
+API_DEFAULT_VERSION = 1
+API_VERSION_RE = re.compile(r"^/api/v(\d+)/")
+
 API_DESCRIPTION = """
 Vyhledávání v přepisech všech videí YouTube kanálu a hromadný přístup k datům (přepisy, úseky, embeddingy).
 Podrobný návod: `docs/API.md` v repozitáři. MCP server pro AI agenty běží na `/mcp`.
+
+**Verzování:** kanonické cesty jsou `/api/v1/…` (stabilní kontrakt). Cesty bez verze `/api/…` jsou alias na
+aktuální výchozí verzi (dnes v1) a mohou se při vydání nové verze změnit; nové verze přibývají jako `/api/v2/…`.
+Odpověď nese `X-API-Version`. Seznam verzí: `/api/versions`.
 
 **Kanály:** index může obsahovat více YouTube kanálů. Každé video, výsledek hledání, pasáž i chunk nese
 `channel` / `channel_id`; seznam kanálů dává `/api/channels`, parametr `channel=<UC id|@handle|primary>` omezí
@@ -293,6 +302,8 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 response.headers["X-Index-Version"] = index_version(db)
             except Exception:
                 pass
+            m = API_VERSION_RE.match(request.url.path)
+            response.headers["X-API-Version"] = m.group(1) if m else str(API_DEFAULT_VERSION)
         return response
 
     def channels_map() -> dict:
@@ -308,6 +319,8 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             if value in (c["id"], c["handle"], (c["handle"] or "").lstrip("@")):
                 return c["id"]
         raise HTTPException(404, f"Kanál {value!r} není v indexu")
+
+    router = APIRouter()   # verze 1; mountuje se na /api/v1 (kanonicky) i /api (alias aktuální verze)
 
     api_key = os.environ.get("YTINDEX_API_KEY", "")
 
@@ -343,7 +356,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
     def health():
         return {"ok": True, "version": __version__}
 
-    @app.get("/api/channel", response_model=ChannelOut, tags=["videa"], summary="Primární kanál a stav indexu")
+    @router.get("/channel", response_model=ChannelOut, tags=["videa"], summary="Primární kanál a stav indexu")
     def channel():
         """Primární kanál instance (ten, který web filtruje) + celkové statistiky indexu + seznam všech kanálů."""
         ch = db.get_channel(cfg.channel.id or None)
@@ -351,13 +364,13 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             raise HTTPException(404, "Kanál ještě nebyl inicializován (spusť `ytindex init`)")
         return {**channel_dict(ch), "stats": db.stats(), "channels": db.channel_stats()}
 
-    @app.get("/api/channels", response_model=ChannelsOut, tags=["videa"], summary="Všechny kanály v indexu")
+    @router.get("/channels", response_model=ChannelsOut, tags=["videa"], summary="Všechny kanály v indexu")
     def channels_list():
         """Kanály v indexu s počty videí; `primary` je kanál, na který se omezuje web. Hodnoty `id` (nebo `handle`)
         se používají v parametru `channel` ostatních endpointů."""
         return {"primary": cfg.channel.id or None, "index_version": index_version(db), "channels": db.channel_stats()}
 
-    @app.get("/api/search", response_model=SearchOut, tags=["hledání"], summary="Hybridní hledání")
+    @router.get("/search", response_model=SearchOut, tags=["hledání"], summary="Hybridní hledání")
     def api_search(
         q: str = Query(..., min_length=1, max_length=300, description="Hledaný výraz; fráze v uvozovkách"),
         limit: int = Query(20, ge=1, le=100),
@@ -370,7 +383,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         effective = mode if (mode == "fts" or embed_query_fn() is not None) else "fts"
         return {"query": q, "mode": effective, "channel": cid, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
 
-    @app.get("/api/context", response_model=ContextOut, tags=["rešerše"], summary="Pasáže k tématu")
+    @router.get("/context", response_model=ContextOut, tags=["rešerše"], summary="Pasáže k tématu")
     def api_context(q: str = Query(..., min_length=1, max_length=500, description="Otázka nebo téma"),
                     max_passages: int = Query(8, ge=1, le=20), context_seconds: int = Query(90, ge=20, le=600),
                     per_video: int = Query(3, ge=1, le=10),
@@ -382,7 +395,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         return {"question": q, "channel": cid, "indexed_videos": db.count_videos(channel_id=cid, status="done"),
                 "passages": [p.__dict__ for p in ps]}
 
-    @app.get("/api/ask", response_model=AskOut, tags=["rešerše"], summary="Odpověď s citacemi (Gemini)")
+    @router.get("/ask", response_model=AskOut, tags=["rešerše"], summary="Odpověď s citacemi (Gemini)")
     def api_ask(q: str = Query(..., min_length=1, max_length=500), max_passages: int = Query(8, ge=1, le=20),
                 context_seconds: int = Query(90, ge=20, le=600),
                 channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
@@ -390,7 +403,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         return rag_answer(cfg, db, q, embed_query=embed_query_fn(), max_passages=max_passages,
                           context_s=float(context_seconds), channel_id=resolve_channel(channel))
 
-    @app.get("/api/videos", response_model=VideoListOut, tags=["videa"], summary="Seznam videí")
+    @router.get("/videos", response_model=VideoListOut, tags=["videa"], summary="Seznam videí")
     def videos(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=200),
                status: str | None = Query("done", pattern="^(pending|queued|done|missing|failed|all)$",
                                           description="Výchozí jen videa s transkriptem (done); all = všechna"),
@@ -403,7 +416,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         return {"total": db.count_videos(channel_id=cid, status=st), "page": page, "per_page": per_page,
                 "items": [_video_out(r, chans) for r in rows]}
 
-    @app.get("/api/videos/{video_id}/segments", response_model=list[SegmentOut], tags=["videa"], summary="Přepis videa")
+    @router.get("/videos/{video_id}/segments", response_model=list[SegmentOut], tags=["videa"], summary="Přepis videa")
     def video_segments(video_id: str):
         """Celý přepis videa jako segmenty s časem (zdroj pravdy)."""
         if not db.get_video(video_id):
@@ -412,7 +425,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]
 
-    @app.get("/api/chunks", response_model=ChunkListOut, tags=["hromadný přístup"], summary="Úseky s embeddingy (kurzor)")
+    @router.get("/chunks", response_model=ChunkListOut, tags=["hromadný přístup"], summary="Úseky s embeddingy (kurzor)")
     def chunks(video_id: str | None = Query(None, description="jen úseky jednoho videa (bez klíče)"),
                after: int = Query(0, ge=0, description="kurzor: poslední chunk_id"),
                limit: int = Query(500, ge=1, le=2000),
@@ -437,7 +450,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         return {"index_version": index_version(db), "embedding_dim": db.embedding_dim,
                 "next_after": rows[-1]["chunk_id"] if len(rows) == limit else None, "items": items}
 
-    @app.get("/api/changes", response_model=ChangesOut, dependencies=[Depends(require_api_key)],
+    @router.get("/changes", response_model=ChangesOut, dependencies=[Depends(require_api_key)],
              tags=["hromadný přístup"], summary="Změněná videa od času")
     def changes(since: str = Query(..., description="updated_at, od kterého vracet změny (ISO nebo 'YYYY-MM-DD HH:MM:SS', UTC)"),
                 limit: int = Query(500, ge=1, le=2000),
@@ -464,7 +477,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         p = export_dir / "manifest.json"
         return __import__("json").loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
-    @app.get("/api/export", response_model=ExportOut, tags=["hromadný přístup"], summary="Manifest exportu")
+    @router.get("/export", response_model=ExportOut, tags=["hromadný přístup"], summary="Manifest exportu")
     def export_manifest():
         """Verze indexu, počty, parametry embeddingů a soubory exportu (`url`, `size`, `sha256`): `videos.jsonl.gz`,
         `segments.jsonl.gz`, `chunks.jsonl.gz`, `embeddings.npy` (float32 [N,768]), `chunk_ids.npy` (int64 [N], stejné
@@ -476,13 +489,13 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         if export_gcs and export_public:
             urls = public_urls(export_gcs)
         else:
-            urls = {name: f"/api/export/files/{name}" for name in export_names}
+            urls = {name: f"/api/v1/export/files/{name}" for name in export_names}
         files = {name: {"url": url, "size": manifest.get("files", {}).get(name, {}).get("size"),
                         "sha256": manifest.get("files", {}).get(name, {}).get("sha256")} for name, url in urls.items()}
         gcs_db = os.environ.get("YTINDEX_GCS_DB", "")
         if gcs_db:
             files["index.sqlite"] = {"url": f"https://storage.googleapis.com/{gcs_db[5:]}" if export_public
-                                     else "/api/export/files/index.sqlite"}
+                                     else "/api/v1/export/files/index.sqlite"}
         return {"index_version": manifest.get("version") or index_version(db), "generated_at": manifest.get("generated_at"),
                 "counts": manifest.get("counts"), "embedding": manifest.get("embedding"), "files": files,
                 "notes": manifest.get("notes")}
@@ -509,7 +522,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         return StreamingResponse(iter_blob_ranges(blob, start, end), status_code=status, media_type=media_type, headers=headers)
 
-    @app.get("/api/export/files/{name}", dependencies=[Depends(require_api_key)], tags=["hromadný přístup"],
+    @router.get("/export/files/{name}", dependencies=[Depends(require_api_key)], tags=["hromadný přístup"],
              summary="Stažení souboru exportu", response_class=StreamingResponse,
              responses={200: {"content": {"application/octet-stream": {}}, "description": "Soubor (chunked stream)"},
                         206: {"description": "Část souboru podle hlavičky Range"}, 401: {"description": "Chybí X-Api-Key"},
@@ -540,7 +553,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             raise HTTPException(404, "Soubor neexistuje")
         return FileResponse(p, filename=name)
 
-    @app.get("/api/videos/{video_id}", response_model=VideoDetailOut, tags=["videa"], summary="Vše o jednom videu")
+    @router.get("/videos/{video_id}", response_model=VideoDetailOut, tags=["videa"], summary="Vše o jednom videu")
     def video_detail(video_id: str,
                      with_chunks: bool = Query(False, description="přidat úseky pro hledání (chunks)"),
                      with_embeddings: bool = Query(False, description="k úsekům přidat embedding (base64 float32)")):
@@ -565,6 +578,16 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             out["chunks"] = rows
             out["embedding_dim"] = db.embedding_dim
         return out
+
+    @router.get("/versions", tags=["videa"], summary="Verze API")
+    def versions():
+        """Dostupné verze API. `/api/v{n}/…` je stabilní kontrakt; `/api/…` bez verze je alias na `default`
+        a může se při vydání nové verze změnit. Klienti, kteří chtějí stabilitu, používají `/api/v1/…`."""
+        return {"versions": API_VERSIONS, "default": API_DEFAULT_VERSION,
+                "paths": {v: f"/api/v{v}" for v in API_VERSIONS}, "alias": "/api"}
+
+    app.include_router(router, prefix="/api/v1")
+    app.include_router(router, prefix="/api", include_in_schema=False)
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():

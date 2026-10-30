@@ -124,7 +124,7 @@
 </dialog>
 
 <script>
-const API = location.origin;
+const API = location.origin + '/api/v1';
 const MCP_URL = location.origin + '/mcp';
 const $ = s => document.querySelector(s);
 const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -149,7 +149,7 @@ document.querySelectorAll('.tabs [role=tab]').forEach(b => b.addEventListener('c
 
 async function loadChannel(){
   try{
-    const r = await fetch(API+'/api/channel'); if(!r.ok) throw 0;
+    const r = await fetch(API+'/channel'); if(!r.ok) throw 0;
     const c = await r.json();
     $('#chname').textContent = 'Index - ' + c.name; document.title = 'Index - ' + c.name; channelId = c.id;
     const s = c.stats, done = (s.videos_by_status||{}).done||0;
@@ -165,7 +165,7 @@ async function doSearch(q){
   history.replaceState(null,'','?q='+encodeURIComponent(q)+'&mode='+mode);
   $('#status').textContent = 'Hledám…'; $('#results').innerHTML='';
   const t0 = performance.now();
-  const r = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&limit=30&mode=${mode}&channel=${encodeURIComponent(channelId)}`);
+  const r = await fetch(`${API}/search?q=${encodeURIComponent(q)}&limit=30&mode=${mode}&channel=${encodeURIComponent(channelId)}`);
   if(!r.ok){ $('#status').textContent = 'Chyba: '+r.status; return; }
   const d = await r.json();
   const n = d.total;

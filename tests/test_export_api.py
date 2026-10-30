@@ -51,7 +51,7 @@ def test_bulk_endpoints(cfg, db, tmp_path, monkeypatch):
     # segments alias a export manifest (lokální soubory)
     assert len(c.get("/api/videos/vid00000002/segments").json()) == 3
     ex = c.get("/api/export").json()
-    assert ex["counts"]["videos"] == 3 and ex["files"]["chunks.jsonl.gz"]["url"].endswith("/api/export/files/chunks.jsonl.gz")
+    assert ex["counts"]["videos"] == 3 and ex["files"]["chunks.jsonl.gz"]["url"].endswith("/api/v1/export/files/chunks.jsonl.gz")
     assert c.get("/api/export/files/manifest.json").status_code == 401        # soubory chrání API klíč
     assert c.get("/api/export/files/manifest.json", headers=h).status_code == 200
 

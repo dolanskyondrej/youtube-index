@@ -2,6 +2,11 @@
 
 Base URL: `https://ytindex-128410263808.europe-west1.run.app` · OpenAPI: `/openapi.json`, Swagger UI: `/docs` · MCP: `/mcp`
 
+**Verzování.** Kanonické cesty jsou `/api/v1/…` a jejich kontrakt se nemění (jen přibývají nepovinná pole).
+Cesty bez verze `/api/…` jsou alias na aktuální výchozí verzi (dnes v1) a při vydání nové verze se mohou změnit;
+nové verze přibývají jako `/api/v2/…`. Každá odpověď nese `X-API-Version`. Seznam: `GET /api/versions`.
+Integrace si pinují `/api/v1`. Níže jsou cesty psané bez verze kvůli stručnosti; před `/api/` doplň `v1`.
+
 Všechny odpovědi jsou JSON (UTF‑8), všechny endpointy `GET`, CORS povolen. Časy jsou v sekundách od začátku videa,
 odkaz na místo ve videu je vždy `https://www.youtube.com/watch?v={video_id}&t={int(start)}s`.
 
@@ -103,17 +108,18 @@ Pro první načtení bez exportu lze projít `/api/chunks?after=<poslední chunk
 
 ```python
 import httpx, json, gzip, numpy as np
-BASE, KEY = "https://ytindex-128410263808.europe-west1.run.app", "..."
+BASE, KEY = "https://ytindex-128410263808.europe-west1.run.app/api/v1", "..."
 h = {"X-Api-Key": KEY}
-m = httpx.get(f"{BASE}/api/export").json()
+m = httpx.get(f"{BASE}/export").json()
 if m["index_version"] != stored_version:
     for name in ("videos.jsonl.gz", "segments.jsonl.gz", "chunks.jsonl.gz", "chunk_ids.npy", "embeddings.npy"):
-        with httpx.stream("GET", f"{BASE}{m['files'][name]['url']}", headers=h, timeout=None) as r, open(name, "wb") as f:
+        url = m["files"][name]["url"]; url = url if url.startswith("http") else BASE.rsplit("/api", 1)[0] + url
+        with httpx.stream("GET", url, headers=h, timeout=None) as r, open(name, "wb") as f:
             for block in r.iter_bytes(): f.write(block)
     emb, ids = np.load("embeddings.npy", mmap_mode="r"), np.load("chunk_ids.npy")
     stored_version = m["index_version"]
 # později jen změny:
-r = httpx.get(f"{BASE}/api/changes", params={"since": last_sync}, headers=h).json()
+r = httpx.get(f"{BASE}/changes", params={"since": last_sync}, headers=h).json()
 for v in r["items"]:
-    chunks = httpx.get(f"{BASE}/api/chunks", params={"video_id": v["video_id"], "with_embeddings": 1, "limit": 2000}, headers=h).json()
+    full = httpx.get(f"{BASE}/videos/{v['video_id']}", params={"with_chunks": 1, "with_embeddings": 1}).json()
 ```

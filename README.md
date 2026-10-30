@@ -94,6 +94,8 @@ Podrobná specifikace pro vývojáře (datový model, verze indexu, hromadné st
 ukázkový klient): **[docs/API.md](docs/API.md)**. Totéž stručně v OpenAPI popisu na `/docs`.
 
 Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat TypeScript/Swift klienty).
+**Verze:** kanonicky `/api/v1/…`; `/api/…` bez verze je alias na aktuální verzi (dnes v1), další verze budou
+`/api/v2/…`. Hlavička `X-API-Version`, seznam `/api/versions`. Tabulka níže uvádí cesty bez verze.
 
 | Endpoint | Popis |
 |---|---|
