@@ -8,7 +8,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -378,9 +378,48 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 "counts": manifest.get("counts"), "embedding": manifest.get("embedding"), "files": files,
                 "notes": manifest.get("notes")}
 
+    def _stream_blob(stream, size: int, name: str, media_type: str, range_header: str | None):
+        """Streamování po 1 MB blocích; podporuje jednoduchý Range (bytes=a-b) pro navazování stahování."""
+        start, end = 0, size - 1
+        status = 200
+        if range_header and range_header.startswith("bytes="):
+            a, _, b = range_header[6:].partition("-")
+            try:
+                start = int(a) if a else max(0, size - int(b))
+                end = int(b) if (b and a) else size - 1
+            except ValueError:
+                start, end = 0, size - 1
+            if start >= size or end < start:
+                stream.close()
+                raise HTTPException(416, "Range mimo soubor", headers={"Content-Range": f"bytes */{size}"})
+            end = min(end, size - 1)
+            status = 206
+        if start:
+            stream.seek(start)
+        remaining = end - start + 1
+
+        def gen():
+            left = remaining
+            try:
+                while left > 0:
+                    block = stream.read(min(1 << 20, left))
+                    if not block:
+                        break
+                    left -= len(block)
+                    yield block
+            finally:
+                stream.close()
+
+        headers = {"Content-Length": str(remaining), "Accept-Ranges": "bytes",
+                   "Content-Disposition": f"attachment; filename={name}"}
+        if status == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return StreamingResponse(gen(), status_code=status, media_type=media_type, headers=headers)
+
     @app.get("/api/export/files/{name}", include_in_schema=False, dependencies=[Depends(require_api_key)])
-    def export_file(name: str):
+    def export_file(name: str, request: Request):
         name = Path(name).name
+        rng = request.headers.get("range")
         if name == "index.sqlite":
             gcs_db = os.environ.get("YTINDEX_GCS_DB", "")
             if gcs_db:
@@ -388,8 +427,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 stream, size = open_gcs_file(f"gs://{bucket}", path)
                 if stream is None:
                     raise HTTPException(404, "Index v bucketu neexistuje")
-                return StreamingResponse(stream, media_type="application/vnd.sqlite3",
-                                         headers={"Content-Length": str(size), "Content-Disposition": "attachment; filename=index.sqlite"})
+                return _stream_blob(stream, size, name, "application/vnd.sqlite3", rng)
             return FileResponse(db.path, filename="index.sqlite") if getattr(db, "path", None) else Response(status_code=404)
         if name not in export_names:
             raise HTTPException(404, "Soubor neexistuje")
@@ -397,8 +435,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             stream, size = open_gcs_file(export_gcs, name)
             if stream is None:
                 raise HTTPException(404, "Soubor v bucketu neexistuje")
-            return StreamingResponse(stream, media_type="application/octet-stream",
-                                     headers={"Content-Length": str(size), "Content-Disposition": f"attachment; filename={name}"})
+            return _stream_blob(stream, size, name, "application/octet-stream", rng)
         p = export_dir / name
         if not p.exists():
             raise HTTPException(404, "Soubor neexistuje")
