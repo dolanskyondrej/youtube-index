@@ -72,10 +72,11 @@ Token bucket na IP (`429` + `Retry-After` v sekundách): hledání 60/min, `/api
 1. GET /api/changes?since=<poslední updated_at>&limit=500        (X-Api-Key)
      → items = videa s updated_at > since (nejstarší první), next_since = kurzor
      opakuj se since=next_since, dokud next_since != null
-2. pro každé změněné video:
-     GET /api/videos/{id}                     metadata + segments (přepis)
-     GET /api/chunks?video_id={id}&with_embeddings=1&limit=2000   úseky + embeddingy
-     (embedding = base64 ze 768 × float32 little‑endian; null, pokud ještě nebyl spočítán)
+2. pro každé změněné video jedno volání:
+     GET /api/videos/{id}?with_chunks=1&with_embeddings=1   (X-Api-Key)
+       → metadata, channel, gaps, segments (přepis), chunks s embeddingy, index_version
+     (embedding = base64 ze 768 × float32 little‑endian; null, pokud ještě nebyl spočítán;
+      bez embeddingů klíč není potřeba; `/api/chunks?video_id=` zůstává jako alternativa se stránkováním)
 3. ulož max(updated_at) jako nový since
 ```
 

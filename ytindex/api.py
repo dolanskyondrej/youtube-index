@@ -208,7 +208,10 @@ class SegmentOut(BaseModel):
 
 class VideoDetailOut(VideoOut):
     description: str
-    segments: list[SegmentOut]
+    segments: list[SegmentOut] = Field(description="Celý přepis s časy (zdroj pravdy)")
+    chunks: list[ChunkOut] | None = Field(None, description="Úseky pro hledání; jen s `with_chunks=1` (embeddingy s `with_embeddings=1` + X-Api-Key)")
+    embedding_dim: int | None = None
+    index_version: str | None = None
 
 
 class VideoListOut(BaseModel):
@@ -532,15 +535,34 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             raise HTTPException(404, "Soubor neexistuje")
         return FileResponse(p, filename=name)
 
-    @app.get("/api/videos/{video_id}", response_model=VideoDetailOut, tags=["videa"], summary="Detail videa s přepisem")
-    def video_detail(video_id: str):
+    @app.get("/api/videos/{video_id}", response_model=VideoDetailOut, tags=["videa"], summary="Vše o jednom videu")
+    def video_detail(video_id: str,
+                     with_chunks: bool = Query(False, description="přidat úseky pro hledání (chunks)"),
+                     with_embeddings: bool = Query(False, description="k úsekům přidat embedding (base64 float32); vyžaduje X-Api-Key"),
+                     x_api_key: str | None = Header(None, alias="X-Api-Key")):
+        """Kompletní informace k videu v jednom volání: metadata, kanál, mezery v přepisu (`gaps`), celý přepis
+        (`segments`) a volitelně úseky (`chunks`) včetně embeddingů. Klient, který si zrcadlí jedno video, nepotřebuje
+        nic dalšího; `index_version` říká, ke které verzi indexu data patří."""
         r = db.get_video(video_id)
         if not r:
             raise HTTPException(404, "Video nenalezeno")
+        if with_embeddings and api_key and x_api_key != api_key:
+            raise HTTPException(401, "Embeddingy vyžadují X-Api-Key")
         segs = [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]
-        return {**_video_out(r, channels_map()), "description": r["description"] or "", "segments": segs}
+        out = {**_video_out(r, channels_map()), "description": r["description"] or "", "segments": segs,
+               "index_version": index_version(db)}
+        if with_chunks or with_embeddings:
+            rows = db.list_chunks(video_id=video_id, limit=100_000, with_embeddings=with_embeddings)
+            for c in rows:
+                if with_embeddings:
+                    c["embedding"] = embedding_b64(c["embedding"]) if c.get("embedding") else None
+                else:
+                    c.pop("embedding", None)
+            out["chunks"] = rows
+            out["embedding_dim"] = db.embedding_dim
+        return out
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():

@@ -102,7 +102,8 @@ Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat 
 | `/api/ask?q=…` | odpověď Gemini sestavená jen z přepisů, s citacemi [n] a seznamem pasáží |
 | `/api/channels` | všechny kanály v indexu (id, name, url, handle, počty); `primary` = kanál webu |
 | `/api/videos?page=1&per_page=50&status=done&channel=` | seznam videí (status=all pro vše; pole `channel`, `gaps`, `updated_at`) |
-| `/api/videos/{id}/segments` | celý přepis videa jako segmenty s časem |
+| `/api/videos/{id}?with_chunks=1&with_embeddings=1` | vše k jednomu videu: metadata, kanál, mezery, celý přepis, volitelně úseky s embeddingy (embeddingy s klíčem) |
+| `/api/videos/{id}/segments` | jen přepis videa jako segmenty s časem |
 | `/api/export` | manifest hromadného exportu: verze indexu, počty, parametry embeddingů, odkazy na soubory |
 | `/api/export/files/{name}` | stažení exportu: `videos.jsonl.gz`, `segments.jsonl.gz`, `chunks.jsonl.gz`, `embeddings.npy` (float32 [N,768]), `chunk_ids.npy`, `manifest.json`, `index.sqlite` |
 | `/api/chunks?video_id=&after=&limit=500&with_embeddings=1` | hromadné čtení úseků kurzorem, embedding jako base64 float32 |

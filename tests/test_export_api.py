@@ -54,3 +54,18 @@ def test_bulk_endpoints(cfg, db, tmp_path, monkeypatch):
     assert ex["counts"]["videos"] == 3 and ex["files"]["chunks.jsonl.gz"]["url"].endswith("/api/export/files/chunks.jsonl.gz")
     assert c.get("/api/export/files/manifest.json").status_code == 401        # soubory chrání API klíč
     assert c.get("/api/export/files/manifest.json", headers=h).status_code == 200
+
+
+def test_video_detail_everything_in_one_call(cfg, db, monkeypatch):
+    monkeypatch.setenv("YTINDEX_API_KEY", "tajne")
+    rows = db.pending_embeddings(limit=100)
+    db.store_embeddings([(r["id"], [0.25] * db.embedding_dim) for r in rows])
+    c = TestClient(create_app(cfg, db, rate_limit=False))
+    d = c.get("/api/videos/vid00000002").json()
+    assert d["chunks"] is None and len(d["segments"]) == 3 and d["channel"]["id"] == cfg.channel.id and d["index_version"]
+    d = c.get("/api/videos/vid00000002", params={"with_chunks": 1}).json()
+    assert d["chunks"] and all(ch["video_id"] == "vid00000002" and "embedding" not in ch for ch in d["chunks"])
+    assert c.get("/api/videos/vid00000002", params={"with_embeddings": 1}).status_code == 401
+    d = c.get("/api/videos/vid00000002", params={"with_embeddings": 1}, headers={"X-Api-Key": "tajne"}).json()
+    assert d["embedding_dim"] == db.embedding_dim and all(ch["embedding"] for ch in d["chunks"])
+    assert struct.unpack("f", base64.b64decode(d["chunks"][0]["embedding"])[:4])[0] == 0.25
