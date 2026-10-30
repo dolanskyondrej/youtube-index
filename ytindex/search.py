@@ -52,6 +52,16 @@ class VideoHit:
     match_count: int
     match: Match
     matches: list[Match]
+    channel: dict | None = None     # {id, name, url, handle} – odkud video pochází
+
+
+def channel_from_row(r) -> dict | None:
+    keys = r.keys() if hasattr(r, "keys") else r
+    if "channel_id" not in keys or r["channel_id"] is None:
+        return None
+    handle = r["channel_handle"] if "channel_handle" in keys else None
+    url = f"https://www.youtube.com/{handle}" if handle else (r["channel_url"] if "channel_url" in keys else None)
+    return {"id": r["channel_id"], "name": r["channel_name"] if "channel_name" in keys else None, "url": url, "handle": handle}
 
 
 def _video_url(video_id: str, start: float | None = None) -> str:
@@ -59,20 +69,20 @@ def _video_url(video_id: str, start: float | None = None) -> str:
     return f"{base}&t={int(start)}s" if start is not None else base
 
 
-def _fts_hits(db, q: str, limit: int, allow_or: bool = True) -> tuple[list[tuple[int, float]], float]:
+def _fts_hits(db, q: str, limit: int, allow_or: bool = True, channel_id: str | None = None) -> tuple[list[tuple[int, float]], float]:
     """Nejprve AND, při nule výsledků (volitelně) OR. Vrací (zásahy, váha)."""
     for mode, weight in (("and", W_FTS_AND), ("or", W_FTS_OR)):
         if mode == "or" and not allow_or:
             break
-        rows = db.fts_hits(q, mode, limit)
+        rows = db.fts_hits(q, mode, limit, channel_id=channel_id)
         if rows:
             return rows, weight
     return [], 0.0
 
 
-def _vec_hits(db, qvec: list[float], limit: int) -> tuple[list[tuple[int, float]], set[int]]:
+def _vec_hits(db, qvec: list[float], limit: int, channel_id: str | None = None) -> tuple[list[tuple[int, float]], set[int]]:
     """(top-N podle vzdálenosti, množina id "blízko nejlepšího" pro počítání shod)"""
-    rows = db.vec_hits(qvec, limit)
+    rows = db.vec_hits(qvec, limit, channel_id=channel_id)
     if not rows:
         return [], set()
     best_sim = 1.0 - rows[0][1]
@@ -117,8 +127,10 @@ def _manual_highlight(text: str, q: str) -> str:
 
 
 def search(db, q: str, limit: int = 20, mode: str = "hybrid",
-           embed_query=None, per_video_matches: int = 3, candidates: int = 200) -> list[VideoHit]:
-    """mode: hybrid | fts | vector. embed_query: callable(str) -> list[float] (None = jen fulltext)."""
+           embed_query=None, per_video_matches: int = 3, candidates: int = 200,
+           channel_id: str | None = None) -> list[VideoHit]:
+    """mode: hybrid | fts | vector. embed_query: callable(str) -> list[float] (None = jen fulltext).
+    channel_id: omezit na jeden kanál (None = všechny kanály v indexu)."""
     q = q.strip()
     if not q:
         return []
@@ -127,7 +139,7 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
     counted: set[int] = set()   # chunky, které se počítají jako "shoda"
     in_fts: set[int] = set()
     if mode in ("hybrid", "fts") or not use_vec:
-        hits, weight = _fts_hits(db, q, candidates, allow_or=not use_vec)
+        hits, weight = _fts_hits(db, q, candidates, allow_or=not use_vec, channel_id=channel_id)
         for rank, (cid, _) in enumerate(hits):
             rrf[cid] = rrf.get(cid, 0.0) + weight / (RRF_K + rank)
             counted.add(cid)
@@ -135,7 +147,7 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
     if use_vec:
         try:
             qvec = embed_query(q)
-            hits, close = _vec_hits(db, qvec, VEC_CANDIDATES)
+            hits, close = _vec_hits(db, qvec, VEC_CANDIDATES, channel_id=channel_id)
             for rank, (cid, _) in enumerate(hits):
                 rrf[cid] = rrf.get(cid, 0.0) + W_VEC / (RRF_K + rank)
                 if cid in in_fts:
@@ -178,6 +190,7 @@ def search(db, q: str, limit: int = 20, mode: str = "hybrid",
             thumbnail=v["thumbnail_url"] or f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
             published_at=v["published_at"], duration_s=v["duration_s"],
             score=round(score, 6), match_count=n_matches, match=matches[0], matches=matches,
+            channel=channel_from_row(v),
         ))
     hits.sort(key=lambda h: -h.score)
     return hits[:limit]

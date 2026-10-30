@@ -130,7 +130,7 @@ def run_ingest(cfg: Config, db, limit: int | None = None, retry: bool = False, s
     statuses = ["pending"] + (["failed", "missing"] if retry else [])
     todo = []
     for st in statuses:
-        todo += db.list_videos(status=st, limit=10**6, order="position ASC")
+        todo += db.list_videos(channel_id=cfg.channel.id, status=st, limit=10**6, order="position ASC")
     if ids:
         wanted = set(ids)
         todo = [v for v in todo if v["id"] in wanted]
@@ -183,6 +183,11 @@ def cmd_ingest(args) -> int:
     from .db import open_database
 
     cfg = load_config()
+    if args.channel:
+        # další kanál do stejného indexu: vyřešit a zapsat, zpracovávat jen jeho videa
+        from .youtube import resolve_channel
+        info = resolve_channel(args.channel, proxy=cfg.proxy_url or None, cookies_file=cfg.transcripts.cookies_file or None)
+        cfg.channel.input, cfg.channel.id, cfg.channel.name, cfg.channel.url = args.channel, info.id, info.name, info.url
     _require_channel(cfg)
     db = open_database(cfg)
     db.upsert_channel(cfg.channel.id, cfg.channel.name, cfg.channel.url, cfg.channel.input)
@@ -537,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--providers", help="pořadí providerů, např. captions,gemini")
     s.add_argument("--no-embed", action="store_true", help="nepočítat embeddingy")
     s.add_argument("--ids", help="zpracovat jen tato video ID (oddělená čárkou)")
+    s.add_argument("--channel", help="jiný kanál (handle/ID/URL) do stejného indexu; web dál filtruje primární kanál z ytindex.toml")
     s.set_defaults(fn=cmd_ingest)
 
     s = sub.add_parser("embed", help="dopočítá chybějící embeddingy (Gemini)")

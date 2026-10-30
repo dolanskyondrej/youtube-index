@@ -100,7 +100,8 @@ Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat 
 | `/api/search?q=…&limit=20&mode=hybrid\|fts\|vector&per_video=3` | hlavní hledání; výsledky seskupené po videích |
 | `/api/context?q=…&max_passages=8&context_seconds=90` | rešerše pro psaní: souvislé pasáže k tématu (shoda + okolní řeč, střídavě z videí), s čísly citací a odkazy na čas |
 | `/api/ask?q=…` | odpověď Gemini sestavená jen z přepisů, s citacemi [n] a seznamem pasáží |
-| `/api/videos?page=1&per_page=50&status=done` | seznam videí kanálu (status=all pro vše; pole `gaps`, `updated_at`) |
+| `/api/channels` | všechny kanály v indexu (id, name, url, handle, počty); `primary` = kanál webu |
+| `/api/videos?page=1&per_page=50&status=done&channel=` | seznam videí (status=all pro vše; pole `channel`, `gaps`, `updated_at`) |
 | `/api/videos/{id}/segments` | celý přepis videa jako segmenty s časem |
 | `/api/export` | manifest hromadného exportu: verze indexu, počty, parametry embeddingů, odkazy na soubory |
 | `/api/export/files/{name}` | stažení exportu: `videos.jsonl.gz`, `segments.jsonl.gz`, `chunks.jsonl.gz`, `embeddings.npy` (float32 [N,768]), `chunk_ids.npy`, `manifest.json`, `index.sqlite` |
@@ -134,6 +135,11 @@ Příklad odpovědi `/api/search?q=bitcoin`:
 ```
 
 `highlighted` obsahuje **pouze** značky `<mark>`; frontend zbytek escapuje (viz `ytindex/web/index.html`).
+
+**Více kanálů v jednom indexu.** `ytindex ingest --channel @jiny_kanal` přidá další kanál do stejné databáze
+(videa, chunky, embeddingy nesou `channel_id`). Web filtruje vždy primární kanál z `ytindex.toml`
+(`channel=primary`), API a MCP pracují bez parametru nad všemi kanály a `channel=<UC id|@handle|primary>` je omezí.
+Každý výsledek hledání, video, pasáž i chunk vrací, z jakého kanálu je (`channel {id, name, url, handle}`).
 
 **Hromadné stahování celého obsahu.** Každá odpověď `/api/*` nese hlavičku `X-Index-Version` (verze indexu =
 generation souboru v bucketu). Doporučený postup klienta: číst `/api/export`, při změně `index_version` stáhnout

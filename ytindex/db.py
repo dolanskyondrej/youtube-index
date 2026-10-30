@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS channels (
     name TEXT,
     url TEXT,
     input TEXT,
+    handle TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -82,6 +83,24 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
+def handle_from_input(value: str | None) -> str | None:
+    """'https://youtube.com/@kanal?si=…' / '@kanal' → '@kanal'; jinak None."""
+    import re as _re
+    if not value:
+        return None
+    m = _re.search(r"(?:^|/)(@[\w.\-]+)", value)
+    return m.group(1) if m else None
+
+
+def channel_dict(row) -> dict | None:
+    """Jednotná podoba kanálu v API: id, name, url (handle má přednost), handle."""
+    if row is None:
+        return None
+    handle = row["handle"] if "handle" in row.keys() else None
+    url = f"https://www.youtube.com/{handle}" if handle else row["url"]
+    return {"id": row["id"], "name": row["name"], "url": url, "handle": handle}
+
+
 def serialize_f32(vec: Iterable[float]) -> bytes:
     v = list(vec)
     return struct.pack(f"{len(v)}f", *v)
@@ -118,6 +137,9 @@ class Database:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(videos)")}
         if "position" not in cols:
             self.conn.execute("ALTER TABLE videos ADD COLUMN position INTEGER")
+        ccols = {r[1] for r in self.conn.execute("PRAGMA table_info(channels)")}
+        if "handle" not in ccols:
+            self.conn.execute("ALTER TABLE channels ADD COLUMN handle TEXT")
         if self.vec_available:
             stored = self.get_meta("embedding_dim")
             if stored and int(stored) != self.embedding_dim:
@@ -155,18 +177,32 @@ class Database:
         self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, value))
 
     # ---------- channels / videos ----------
-    def upsert_channel(self, id: str, name: str, url: str, input: str = "") -> None:
+    def upsert_channel(self, id: str, name: str, url: str, input: str = "", handle: str | None = None) -> None:
+        handle = handle or handle_from_input(input)
         with self.tx() as c:
             c.execute(
-                "INSERT INTO channels(id, name, url, input) VALUES (?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url, input=excluded.input",
-                (id, name, url, input),
+                "INSERT INTO channels(id, name, url, input, handle) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET name=excluded.name, url=excluded.url, input=excluded.input, "
+                "handle=COALESCE(excluded.handle, channels.handle)",
+                (id, name, url, input, handle),
             )
 
     def get_channel(self, id: str | None = None) -> sqlite3.Row | None:
         if id:
             return self.conn.execute("SELECT * FROM channels WHERE id=?", (id,)).fetchone()
         return self.conn.execute("SELECT * FROM channels ORDER BY created_at LIMIT 1").fetchone()
+
+    def list_channels(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM channels ORDER BY created_at").fetchall()
+
+    def channel_stats(self) -> list[dict]:
+        """Souhrn per kanál: počet videí, hotových, hodin přepisu."""
+        rows = self.conn.execute(
+            "SELECT c.id, c.name, c.url, c.handle, COUNT(v.id) AS videos, "
+            "SUM(CASE WHEN v.transcript_status='done' THEN 1 ELSE 0 END) AS done, "
+            "COALESCE(SUM(CASE WHEN v.transcript_status='done' THEN v.duration_s ELSE 0 END),0)/3600.0 AS hours "
+            "FROM channels c LEFT JOIN videos v ON v.channel_id = c.id GROUP BY c.id ORDER BY c.created_at").fetchall()
+        return [{**channel_dict(r), "videos": r["videos"], "done": r["done"], "hours": round(r["hours"], 1)} for r in rows]
 
     def upsert_video(self, v: dict) -> None:
         """v: id, channel_id, title, description, published_at, duration_s, view_count, thumbnail_url"""
@@ -310,54 +346,65 @@ class Database:
                 for r in self.conn.execute("SELECT chunk_id, embedding FROM chunk_vec ORDER BY chunk_id"))
 
     def list_chunks(self, video_id: str | None = None, after: int = 0, limit: int = 500,
-                    with_embeddings: bool = False) -> list[dict]:
+                    with_embeddings: bool = False, channel_id: str | None = None) -> list[dict]:
         where, params = ["c.id > ?"], [after]
         if video_id:
             where.append("c.video_id = ?"); params.append(video_id)
-        sql = ('SELECT c.id, c.video_id, c.idx, c.start, c.end, c.text, c.embedded'
+        if channel_id:
+            where.append("vid.channel_id = ?"); params.append(channel_id)
+        sql = ('SELECT c.id, c.video_id, c.idx, c.start, c.end, c.text, c.embedded, vid.channel_id'
                + (', v.embedding' if with_embeddings and self.vec_available else ', NULL AS embedding')
-               + ' FROM chunks c'
+               + ' FROM chunks c JOIN videos vid ON vid.id = c.video_id'
                + (' LEFT JOIN chunk_vec v ON v.chunk_id = c.id' if with_embeddings and self.vec_available else '')
                + ' WHERE ' + ' AND '.join(where) + ' ORDER BY c.id LIMIT ?')
         out = []
         for r in self.conn.execute(sql, (*params, limit)):
-            d = {"chunk_id": r["id"], "video_id": r["video_id"], "idx": r["idx"], "start": r["start"], "end": r["end"],
-                 "text": r["text"], "embedded": bool(r["embedded"])}
+            d = {"chunk_id": r["id"], "video_id": r["video_id"], "channel_id": r["channel_id"], "idx": r["idx"],
+                 "start": r["start"], "end": r["end"], "text": r["text"], "embedded": bool(r["embedded"])}
             if with_embeddings:
                 d["embedding"] = list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])) if r["embedding"] else None
             out.append(d)
         return out
 
-    def videos_changed_since(self, since: str, limit: int = 1000) -> list[sqlite3.Row]:
+    def videos_changed_since(self, since: str, limit: int = 1000, channel_id: str | None = None) -> list[sqlite3.Row]:
         """Videa s updated_at > since (ISO/`YYYY-MM-DD HH:MM:SS`), nejstarší změna první."""
+        if channel_id:
+            return self.conn.execute(
+                "SELECT * FROM videos WHERE updated_at > ? AND channel_id = ? ORDER BY updated_at, id LIMIT ?",
+                (since, channel_id, limit)).fetchall()
         return self.conn.execute(
             "SELECT * FROM videos WHERE updated_at > ? ORDER BY updated_at, id LIMIT ?", (since, limit)).fetchall()
 
     # ---------- vyhledávací primitiva (stejné rozhraní má PostgresDatabase) ----------
     backend = "sqlite"
 
-    def fts_hits(self, q: str, mode: str, limit: int) -> list[tuple[int, float]]:
-        """[(chunk_id, rank)] seřazené od nejlepšího. mode: and | or."""
+    _CHANNEL_SUB = "(SELECT c.id FROM chunks c JOIN videos v ON v.id = c.video_id WHERE v.channel_id = ?)"
+
+    def fts_hits(self, q: str, mode: str, limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
+        """[(chunk_id, rank)] seřazené od nejlepšího. mode: and | or. channel_id omezí na jeden kanál."""
         fts_query = build_fts_query(q, mode)
         if not fts_query:
             return []
+        sql = "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ?"
+        params: list = [fts_query]
+        if channel_id:
+            sql += f" AND rowid IN {self._CHANNEL_SUB}"; params.append(channel_id)
+        sql += " ORDER BY r LIMIT ?"; params.append(limit)
         try:
-            rows = self.conn.execute(
-                "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY r LIMIT ?",
-                (fts_query, limit),
-            ).fetchall()
+            rows = self.conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             return []
         return [(r["rowid"], r["r"]) for r in rows]
 
-    def vec_hits(self, qvec: list[float], limit: int) -> list[tuple[int, float]]:
+    def vec_hits(self, qvec: list[float], limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
         """[(chunk_id, cosine_distance)] seřazené od nejbližšího."""
         if not self.vec_available:
             return []
-        rows = self.conn.execute(
-            "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-            (serialize_f32(qvec), limit),
-        ).fetchall()
+        sql = "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ?"
+        params: list = [serialize_f32(qvec), limit]
+        if channel_id:
+            sql += f" AND chunk_id IN {self._CHANNEL_SUB}"; params.append(channel_id)
+        rows = self.conn.execute(sql + " ORDER BY distance", params).fetchall()
         return [(r["chunk_id"], r["distance"]) for r in rows]
 
     def snippet(self, chunk_id: int, q: str, mode: str) -> str | None:
@@ -378,8 +425,10 @@ class Database:
         if not ids:
             return []
         rows = self.conn.execute(
-            f"SELECT c.id, c.video_id, c.start, c.end, c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url "
-            f"FROM chunks c JOIN videos v ON v.id = c.video_id WHERE c.id IN ({','.join('?' * len(ids))})", ids,
+            f"SELECT c.id, c.video_id, c.start, c.end, c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url, "
+            f"v.channel_id, ch.name AS channel_name, ch.url AS channel_url, ch.handle AS channel_handle "
+            f"FROM chunks c JOIN videos v ON v.id = c.video_id LEFT JOIN channels ch ON ch.id = v.channel_id "
+            f"WHERE c.id IN ({','.join('?' * len(ids))})", ids,
         ).fetchall()
         return [dict(r) for r in rows]
 

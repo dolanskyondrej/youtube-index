@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
-from .db import open_database
+from .db import channel_dict, open_database
 from .export import FILES, embedding_b64, index_version, iter_blob_ranges, open_gcs_file, parse_gaps, public_urls, read_manifest_gcs
 from .ratelimit import rate_limit_middleware
 from .research import answer as rag_answer, gather_context
@@ -28,6 +28,10 @@ WEB_DIR = Path(__file__).parent / "web"
 API_DESCRIPTION = """
 Vyhledávání v přepisech všech videí YouTube kanálu a hromadný přístup k datům (přepisy, úseky, embeddingy).
 Podrobný návod: `docs/API.md` v repozitáři. MCP server pro AI agenty běží na `/mcp`.
+
+**Kanály:** index může obsahovat více YouTube kanálů. Každé video, výsledek hledání, pasáž i chunk nese
+`channel` / `channel_id`; seznam kanálů dává `/api/channels`, parametr `channel=<UC id|@handle|primary>` omezí
+libovolný endpoint na jeden kanál (web používá `primary`). Bez parametru se pracuje nad všemi kanály.
 
 **Datový model:** `video` (metadata, `transcript_status`, `gaps`, `updated_at`) → `segments` (přepis s časy, zdroj
 pravdy) → `chunks` (úseky ~450 znaků pro hledání, každý s embeddingem `gemini-embedding-001`, 768 d, normalizovaný,
@@ -62,6 +66,7 @@ class MatchOut(BaseModel):
 
 class VideoHitOut(BaseModel):
     video_id: str
+    channel: ChannelRefOut | None = Field(None, description="Kanál, ze kterého video pochází")
     title: str
     url: str
     thumbnail: str
@@ -76,6 +81,7 @@ class VideoHitOut(BaseModel):
 class SearchOut(BaseModel):
     query: str
     mode: str
+    channel: str | None = Field(None, description="ID kanálu, na který bylo hledání omezeno (null = všechny)")
     total: int
     results: list[VideoHitOut]
 
@@ -83,6 +89,7 @@ class SearchOut(BaseModel):
 class PassageOut(BaseModel):
     n: int = Field(description="Číslo citace")
     video_id: str
+    channel: ChannelRefOut | None = None
     title: str
     published_at: str | None
     start: float
@@ -95,6 +102,7 @@ class PassageOut(BaseModel):
 
 class ContextOut(BaseModel):
     question: str
+    channel: str | None = None
     indexed_videos: int
     passages: list[PassageOut]
 
@@ -107,6 +115,25 @@ class AskOut(BaseModel):
     citations: list[PassageOut]
 
 
+class ChannelRefOut(BaseModel):
+    id: str = Field(description="YouTube channel id (UC…)")
+    name: str | None
+    url: str | None = Field(description="URL kanálu (handle, např. https://www.youtube.com/@kanal)")
+    handle: str | None
+
+
+class ChannelStatsOut(ChannelRefOut):
+    videos: int
+    done: int
+    hours: float
+
+
+class ChannelsOut(BaseModel):
+    primary: str | None = Field(description="ID kanálu, který je výchozí pro web (konfigurace instance)")
+    index_version: str
+    channels: list[ChannelStatsOut]
+
+
 class GapOut(BaseModel):
     start: int
     end: int
@@ -115,6 +142,8 @@ class GapOut(BaseModel):
 
 class VideoOut(BaseModel):
     video_id: str
+    channel_id: str | None = None
+    channel: ChannelRefOut | None = Field(None, description="Kanál, ze kterého video pochází")
     title: str
     url: str
     thumbnail: str | None
@@ -131,6 +160,7 @@ class VideoOut(BaseModel):
 class ChunkOut(BaseModel):
     chunk_id: int
     video_id: str
+    channel_id: str | None = None
     idx: int
     start: float
     end: float
@@ -192,12 +222,16 @@ class ChannelOut(BaseModel):
     id: str
     name: str
     url: str
+    handle: str | None = None
     stats: dict
+    channels: list[ChannelStatsOut] = Field(default_factory=list, description="Všechny kanály v indexu")
 
 
-def _video_out(r) -> dict:
+def _video_out(r, channels: dict | None = None) -> dict:
     return {
-        "video_id": r["id"], "title": r["title"], "url": f"https://www.youtube.com/watch?v={r['id']}",
+        "video_id": r["id"], "channel_id": r["channel_id"],
+        "channel": (channels or {}).get(r["channel_id"]),
+        "title": r["title"], "url": f"https://www.youtube.com/watch?v={r['id']}",
         "thumbnail": r["thumbnail_url"], "published_at": r["published_at"], "duration_s": r["duration_s"],
         "view_count": r["view_count"], "transcript_status": r["transcript_status"],
         "transcript_source": r["transcript_source"], "transcript_lang": r["transcript_lang"],
@@ -257,6 +291,20 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 pass
         return response
 
+    def channels_map() -> dict:
+        return {c["id"]: channel_dict(c) for c in db.list_channels()}
+
+    def resolve_channel(value: str | None) -> str | None:
+        """Parametr channel: UC id, @handle nebo 'primary'; None = bez filtru. Neznámý → 404."""
+        if not value:
+            return None
+        if value == "primary":
+            return cfg.channel.id or (db.get_channel() or {"id": None})["id"]
+        for c in db.list_channels():
+            if value in (c["id"], c["handle"], (c["handle"] or "").lstrip("@")):
+                return c["id"]
+        raise HTTPException(404, f"Kanál {value!r} není v indexu")
+
     api_key = os.environ.get("YTINDEX_API_KEY", "")
 
     def require_api_key(x_api_key: str | None = Header(None, alias="X-Api-Key")):
@@ -291,12 +339,19 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
     def health():
         return {"ok": True, "version": __version__}
 
-    @app.get("/api/channel", response_model=ChannelOut, tags=["videa"], summary="Kanál a stav indexu")
+    @app.get("/api/channel", response_model=ChannelOut, tags=["videa"], summary="Primární kanál a stav indexu")
     def channel():
+        """Primární kanál instance (ten, který web filtruje) + celkové statistiky indexu + seznam všech kanálů."""
         ch = db.get_channel(cfg.channel.id or None)
         if not ch:
             raise HTTPException(404, "Kanál ještě nebyl inicializován (spusť `ytindex init`)")
-        return {"id": ch["id"], "name": ch["name"], "url": ch["url"], "stats": db.stats()}
+        return {**channel_dict(ch), "stats": db.stats(), "channels": db.channel_stats()}
+
+    @app.get("/api/channels", response_model=ChannelsOut, tags=["videa"], summary="Všechny kanály v indexu")
+    def channels_list():
+        """Kanály v indexu s počty videí; `primary` je kanál, na který se omezuje web. Hodnoty `id` (nebo `handle`)
+        se používají v parametru `channel` ostatních endpointů."""
+        return {"primary": cfg.channel.id or None, "index_version": index_version(db), "channels": db.channel_stats()}
 
     @app.get("/api/search", response_model=SearchOut, tags=["hledání"], summary="Hybridní hledání")
     def api_search(
@@ -304,37 +359,45 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         limit: int = Query(20, ge=1, le=100),
         mode: str = Query("hybrid", pattern="^(hybrid|fts|vector)$"),
         per_video: int = Query(3, ge=1, le=10, description="Kolik shod vrátit pro každé video"),
+        channel: str | None = Query(None, description="Omezit na kanál: UC id, @handle nebo 'primary'. Bez parametru všechny kanály."),
     ):
-        hits = search(db, q, limit=limit, mode=mode, embed_query=embed_query_fn(), per_video_matches=per_video)
+        cid = resolve_channel(channel)
+        hits = search(db, q, limit=limit, mode=mode, embed_query=embed_query_fn(), per_video_matches=per_video, channel_id=cid)
         effective = mode if (mode == "fts" or embed_query_fn() is not None) else "fts"
-        return {"query": q, "mode": effective, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
+        return {"query": q, "mode": effective, "channel": cid, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
 
     @app.get("/api/context", response_model=ContextOut, tags=["rešerše"], summary="Pasáže k tématu")
     def api_context(q: str = Query(..., min_length=1, max_length=500, description="Otázka nebo téma"),
                     max_passages: int = Query(8, ge=1, le=20), context_seconds: int = Query(90, ge=20, le=600),
-                    per_video: int = Query(3, ge=1, le=10)):
+                    per_video: int = Query(3, ge=1, le=10),
+                    channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
         """Rešerše: souvislé pasáže k tématu (pro psaní, RAG v jiném frontendu)."""
+        cid = resolve_channel(channel)
         ps = gather_context(db, q, embed_query=embed_query_fn(), max_passages=max_passages,
-                            context_s=float(context_seconds), per_video=per_video)
-        return {"question": q, "indexed_videos": db.stats()["videos_by_status"].get("done", 0),
+                            context_s=float(context_seconds), per_video=per_video, channel_id=cid)
+        return {"question": q, "channel": cid, "indexed_videos": db.count_videos(channel_id=cid, status="done"),
                 "passages": [p.__dict__ for p in ps]}
 
     @app.get("/api/ask", response_model=AskOut, tags=["rešerše"], summary="Odpověď s citacemi (Gemini)")
     def api_ask(q: str = Query(..., min_length=1, max_length=500), max_passages: int = Query(8, ge=1, le=20),
-                context_seconds: int = Query(90, ge=20, le=600)):
+                context_seconds: int = Query(90, ge=20, le=600),
+                channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
         """Odpověď Gemini sestavená jen z přepisů, s citacemi [n] a odkazy na čas."""
         return rag_answer(cfg, db, q, embed_query=embed_query_fn(), max_passages=max_passages,
-                          context_s=float(context_seconds))
+                          context_s=float(context_seconds), channel_id=resolve_channel(channel))
 
     @app.get("/api/videos", response_model=VideoListOut, tags=["videa"], summary="Seznam videí")
     def videos(page: int = Query(1, ge=1), per_page: int = Query(50, ge=1, le=200),
                status: str | None = Query("done", pattern="^(pending|queued|done|missing|failed|all)$",
                                           description="Výchozí jen videa s transkriptem (done); all = všechna"),
-               order: str = Query("published_at DESC")):
+               order: str = Query("published_at DESC"),
+               channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
         st = None if status == "all" else status
-        rows = db.list_videos(status=st, limit=per_page, offset=(page - 1) * per_page, order=order)
-        return {"total": db.count_videos(status=st), "page": page, "per_page": per_page,
-                "items": [_video_out(r) for r in rows]}
+        cid = resolve_channel(channel)
+        rows = db.list_videos(channel_id=cid, status=st, limit=per_page, offset=(page - 1) * per_page, order=order)
+        chans = channels_map()
+        return {"total": db.count_videos(channel_id=cid, status=st), "page": page, "per_page": per_page,
+                "items": [_video_out(r, chans) for r in rows]}
 
     @app.get("/api/videos/{video_id}/segments", response_model=list[SegmentOut], tags=["videa"], summary="Přepis videa")
     def video_segments(video_id: str):
@@ -349,11 +412,13 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
              tags=["hromadný přístup"], summary="Úseky s embeddingy (kurzor)")
     def chunks(video_id: str | None = Query(None), after: int = Query(0, ge=0, description="kurzor: poslední chunk_id"),
                limit: int = Query(500, ge=1, le=2000),
-               with_embeddings: bool = Query(False, description="přidat embedding (base64 float32)")):
+               with_embeddings: bool = Query(False, description="přidat embedding (base64 float32)"),
+               channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
         """Úseky seřazené podle `chunk_id`, stránkování kurzorem: další stránka = `after=next_after`, konec = `next_after` null.
         `with_embeddings=1` přidá `embedding` jako base64 z 768 × float32 little‑endian (null, pokud ještě nebyl spočítán).
         Pro celý index použij `/api/export` (NumPy je ~5× menší než JSON)."""
-        rows = db.list_chunks(video_id=video_id, after=after, limit=limit, with_embeddings=with_embeddings)
+        rows = db.list_chunks(video_id=video_id, after=after, limit=limit, with_embeddings=with_embeddings,
+                              channel_id=resolve_channel(channel))
         items = []
         for r in rows:
             if with_embeddings:
@@ -367,12 +432,15 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
     @app.get("/api/changes", response_model=ChangesOut, dependencies=[Depends(require_api_key)],
              tags=["hromadný přístup"], summary="Změněná videa od času")
     def changes(since: str = Query(..., description="updated_at, od kterého vracet změny (ISO nebo 'YYYY-MM-DD HH:MM:SS', UTC)"),
-                limit: int = Query(500, ge=1, le=2000)):
+                limit: int = Query(500, ge=1, le=2000),
+                channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
         """Videa s `updated_at` > `since`, nejstarší první. Opakuj se `since=next_since`, dokud není null; pak ulož
         poslední `updated_at`. Změna přepisu = nové `chunk_id` pro celé video (staré úseky videa smaž a nahraď).
         Smazaná videa se tu neobjeví, porovnej občas `/api/videos?status=all`."""
-        rows = db.videos_changed_since(since.replace("T", " ").replace("Z", ""), limit=limit)
-        items = [_video_out(r) for r in rows]
+        rows = db.videos_changed_since(since.replace("T", " ").replace("Z", ""), limit=limit,
+                                       channel_id=resolve_channel(channel))
+        chans = channels_map()
+        items = [_video_out(r, chans) for r in rows]
         return {"index_version": index_version(db), "since": since,
                 "next_since": items[-1]["updated_at"] if len(items) == limit else None, "items": items}
 
@@ -472,7 +540,7 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         segs = [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]
-        return {**_video_out(r), "description": r["description"] or "", "segments": segs}
+        return {**_video_out(r, channels_map()), "description": r["description"] or "", "segments": segs}
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():

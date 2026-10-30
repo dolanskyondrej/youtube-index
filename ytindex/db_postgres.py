@@ -13,6 +13,7 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 from .chunking import Chunk, Segment
+from .db import channel_dict, handle_from_input
 from .query import build_tsquery
 
 SCHEMA = """
@@ -33,8 +34,10 @@ CREATE TABLE IF NOT EXISTS channels (
     name TEXT,
     url TEXT,
     input TEXT,
+    handle TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS handle TEXT;
 
 CREATE TABLE IF NOT EXISTS videos (
     id TEXT PRIMARY KEY,
@@ -151,16 +154,29 @@ class PostgresDatabase:
                       (key, value))
 
     # ---------- channels / videos ----------
-    def upsert_channel(self, id: str, name: str, url: str, input: str = "") -> None:
+    def upsert_channel(self, id: str, name: str, url: str, input: str = "", handle: str | None = None) -> None:
+        handle = handle or handle_from_input(input)
         with self.tx() as c:
-            c.execute("INSERT INTO channels(id, name, url, input) VALUES (%s,%s,%s,%s) "
-                      "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, url=EXCLUDED.url, input=EXCLUDED.input",
-                      (id, name, url, input))
+            c.execute("INSERT INTO channels(id, name, url, input, handle) VALUES (%s,%s,%s,%s,%s) "
+                      "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, url=EXCLUDED.url, input=EXCLUDED.input, "
+                      "handle=COALESCE(EXCLUDED.handle, channels.handle)",
+                      (id, name, url, input, handle))
 
     def get_channel(self, id: str | None = None):
         if id:
             return self._one("SELECT * FROM channels WHERE id=%s", (id,))
         return self._one("SELECT * FROM channels ORDER BY created_at LIMIT 1")
+
+    def list_channels(self):
+        return self._all("SELECT * FROM channels ORDER BY created_at")
+
+    def channel_stats(self) -> list[dict]:
+        rows = self._all(
+            "SELECT c.id, c.name, c.url, c.handle, COUNT(v.id) AS videos, "
+            "SUM(CASE WHEN v.transcript_status='done' THEN 1 ELSE 0 END) AS done, "
+            "COALESCE(SUM(CASE WHEN v.transcript_status='done' THEN v.duration_s ELSE 0 END),0)/3600.0 AS hours "
+            "FROM channels c LEFT JOIN videos v ON v.channel_id = c.id GROUP BY c.id, c.created_at ORDER BY c.created_at")
+        return [{**channel_dict(r), "videos": int(r["videos"]), "done": int(r["done"] or 0), "hours": round(float(r["hours"]), 1)} for r in rows]
 
     def upsert_video(self, v: dict) -> None:
         params = {"description": "", "published_at": None, "duration_s": None, "view_count": None,
@@ -264,45 +280,53 @@ class PostgresDatabase:
             yield r["id"], [float(x) for x in r["embedding"]]
 
     def list_chunks(self, video_id: str | None = None, after: int = 0, limit: int = 500,
-                    with_embeddings: bool = False) -> list[dict]:
-        where, params = ["id > %s"], [after]
+                    with_embeddings: bool = False, channel_id: str | None = None) -> list[dict]:
+        where, params = ["c.id > %s"], [after]
         if video_id:
-            where.append("video_id = %s"); params.append(video_id)
-        rows = self._all('SELECT id, video_id, idx, start, "end", text, embedding IS NOT NULL AS embedded'
-                         + (', embedding' if with_embeddings else '')
-                         + ' FROM chunks WHERE ' + ' AND '.join(where) + ' ORDER BY id LIMIT %s', (*params, limit))
+            where.append("c.video_id = %s"); params.append(video_id)
+        if channel_id:
+            where.append("v.channel_id = %s"); params.append(channel_id)
+        rows = self._all('SELECT c.id, c.video_id, c.idx, c.start, c."end", c.text, c.embedding IS NOT NULL AS embedded, v.channel_id'
+                         + (', c.embedding' if with_embeddings else '')
+                         + ' FROM chunks c JOIN videos v ON v.id = c.video_id WHERE ' + ' AND '.join(where) + ' ORDER BY c.id LIMIT %s', (*params, limit))
         out = []
         for r in rows:
-            d = {"chunk_id": r["id"], "video_id": r["video_id"], "idx": r["idx"], "start": r["start"], "end": r["end"],
-                 "text": r["text"], "embedded": bool(r["embedded"])}
+            d = {"chunk_id": r["id"], "video_id": r["video_id"], "channel_id": r["channel_id"], "idx": r["idx"],
+                 "start": r["start"], "end": r["end"], "text": r["text"], "embedded": bool(r["embedded"])}
             if with_embeddings:
                 d["embedding"] = [float(x) for x in r["embedding"]] if r["embedding"] is not None else None
             out.append(d)
         return out
 
-    def videos_changed_since(self, since: str, limit: int = 1000):
+    def videos_changed_since(self, since: str, limit: int = 1000, channel_id: str | None = None):
+        if channel_id:
+            return self._all("SELECT * FROM videos WHERE updated_at > %s::timestamptz AND channel_id = %s ORDER BY updated_at, id LIMIT %s",
+                             (since, channel_id, limit))
         return self._all("SELECT * FROM videos WHERE updated_at > %s::timestamptz ORDER BY updated_at, id LIMIT %s",
                          (since, limit))
 
     # ---------- vyhledávací primitiva ----------
-    def fts_hits(self, q: str, mode: str, limit: int) -> list[tuple[int, float]]:
+    def fts_hits(self, q: str, mode: str, limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
         tsq = build_tsquery(q, mode)
         if not tsq:
             return []
+        chan = " AND video_id IN (SELECT id FROM videos WHERE channel_id = %s)" if channel_id else ""
+        params = (tsq, channel_id, limit) if channel_id else (tsq, limit)
         try:
             rows = self._all(
                 "SELECT id, ts_rank_cd(tsv, query) AS r FROM chunks, to_tsquery('cs_simple', %s) query "
-                "WHERE tsv @@ query ORDER BY r DESC LIMIT %s", (tsq, limit))
+                f"WHERE tsv @@ query{chan} ORDER BY r DESC LIMIT %s", params)
         except psycopg.Error:
             self.conn.rollback()
             return []
         return [(r["id"], -float(r["r"])) for r in rows]  # záporně, aby 'nižší = lepší' jako u bm25
 
-    def vec_hits(self, qvec: list[float], limit: int) -> list[tuple[int, float]]:
+    def vec_hits(self, qvec: list[float], limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
         import numpy as np
+        chan = " AND video_id IN (SELECT id FROM videos WHERE channel_id = %s)" if channel_id else ""
+        params = (np.asarray(qvec, dtype=np.float32), channel_id, limit) if channel_id else (np.asarray(qvec, dtype=np.float32), limit)
         rows = self._all(
-            "SELECT id, embedding <=> %s AS d FROM chunks WHERE embedding IS NOT NULL ORDER BY d LIMIT %s",
-            (np.asarray(qvec, dtype=np.float32), limit))
+            f"SELECT id, embedding <=> %s AS d FROM chunks WHERE embedding IS NOT NULL{chan} ORDER BY d LIMIT %s", params)
         return [(r["id"], float(r["d"])) for r in rows]
 
     def snippet(self, chunk_id: int, q: str, mode: str) -> str | None:
@@ -323,8 +347,10 @@ class PostgresDatabase:
         if not ids:
             return []
         return self._all(
-            'SELECT c.id, c.video_id, c.start, c."end", c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url '
-            "FROM chunks c JOIN videos v ON v.id = c.video_id WHERE c.id = ANY(%s)", (ids,))
+            'SELECT c.id, c.video_id, c.start, c."end", c.text, v.title, v.published_at, v.duration_s, v.thumbnail_url, '
+            "v.channel_id, ch.name AS channel_name, ch.url AS channel_url, ch.handle AS channel_handle "
+            "FROM chunks c JOIN videos v ON v.id = c.video_id LEFT JOIN channels ch ON ch.id = v.channel_id "
+            "WHERE c.id = ANY(%s)", (ids,))
 
     # ---------- stats ----------
     def stats(self) -> dict:

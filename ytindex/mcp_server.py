@@ -52,37 +52,55 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
         except Exception:
             return None
 
-    @mcp.tool()
-    def search_videos(query: str, limit: int = 10, mode: str = "hybrid", per_video: int = 3) -> dict:
-        """Prohledá transkripty všech videí kanálu. Vrací videa seřazená podle relevance; u každého
-        název, URL, náhledovku a nejlepší úryvky se zvýrazněnou shodou (<mark>) a odkazem na přesný čas.
-        mode: hybrid (fulltext + sémantické, výchozí) | fts (jen fulltext, přesné fráze v uvozovkách) | vector.
-        """
-        hits = search(db, query, limit=max(1, min(limit, 50)), mode=mode, embed_query=embed_fn(),
-                      per_video_matches=max(1, min(per_video, 10)))
-        return {"query": query, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
+    def _channel_id(channel: str | None) -> str | None:
+        """'primary' = kanál instance; UC id nebo @handle; None/'' = všechny kanály v indexu."""
+        if not channel:
+            return None
+        if channel == "primary":
+            return cfg.channel.id or None
+        for c in db.list_channels():
+            if channel in (c["id"], c["handle"], (c["handle"] or "").lstrip("@")):
+                return c["id"]
+        return channel
 
     @mcp.tool()
-    def research_topic(question: str, max_passages: int = 8, context_seconds: int = 90, per_video: int = 3) -> dict:
+    def search_videos(query: str, limit: int = 10, mode: str = "hybrid", per_video: int = 3,
+                      channel: str | None = None) -> dict:
+        """Prohledá transkripty videí. Vrací videa seřazená podle relevance; u každého název, URL, kanál
+        (pole channel: id, name, url), náhledovku a nejlepší úryvky se zvýrazněnou shodou (<mark>) a odkazem na přesný čas.
+        mode: hybrid (fulltext + sémantické, výchozí) | fts (jen fulltext, přesné fráze v uvozovkách) | vector.
+        channel: omezit na kanál (UC id, @handle nebo 'primary'); bez hodnoty všechny kanály v indexu.
+        """
+        cid = _channel_id(channel)
+        hits = search(db, query, limit=max(1, min(limit, 50)), mode=mode, embed_query=embed_fn(),
+                      per_video_matches=max(1, min(per_video, 10)), channel_id=cid)
+        return {"query": query, "channel": cid, "total": len(hits), "results": [hit_to_dict(h) for h in hits]}
+
+    @mcp.tool()
+    def research_topic(question: str, max_passages: int = 8, context_seconds: int = 90, per_video: int = 3,
+                       channel: str | None = None) -> dict:
         """Rešerše pro psaní: k otázce/tématu vrátí nejrelevantnější SOUVISLÉ pasáže z přepisů (každá shoda rozšířená
         o okolní řeč, výchozí ±45 s), střídavě z různých videí, s číslem citace, názvem videa, časem a odkazem.
         Použij, když chceš vědět, co k tématu zaznělo, jak dotyčný uvažuje a formuluje – a pak to citovat.
-        Mluvčí není rozlišen (ve studiu bývají hosté), posuzuj z kontextu.
+        Mluvčí není rozlišen (ve studiu bývají hosté), posuzuj z kontextu. channel: UC id / @handle / 'primary' / nic = vše.
+        Každá pasáž nese channel (odkud video je).
         """
+        cid = _channel_id(channel)
         ps = gather_context(db, question, embed_query=embed_fn(), max_passages=max(1, min(max_passages, 20)),
-                            context_s=float(max(20, min(context_seconds, 600))), per_video=max(1, min(per_video, 10)))
-        stats = db.stats()
-        return {"question": question, "indexed_videos": stats["videos_by_status"].get("done", 0),
+                            context_s=float(max(20, min(context_seconds, 600))), per_video=max(1, min(per_video, 10)),
+                            channel_id=cid)
+        return {"question": question, "channel": cid, "indexed_videos": db.count_videos(channel_id=cid, status="done"),
                 "passages": [asdict(p) for p in ps],
                 "hint": "Cituj doslovně z pole text a ke každé citaci uveď url (odkaz na čas ve videu)."}
 
     @mcp.tool()
-    def ask_channel(question: str, max_passages: int = 8, context_seconds: int = 90) -> dict:
+    def ask_channel(question: str, max_passages: int = 8, context_seconds: int = 90, channel: str | None = None) -> dict:
         """Odpověď na otázku sestavená Gemini výhradně z přepisů (RAG) s citacemi [n]; pole citations obsahuje
-        pasáže s odkazy na čas. Hodí se pro rychlé „co k tomu Urza říkal“; pro vlastní syntézu použij research_topic.
+        pasáže s odkazy na čas a kanálem. Hodí se pro rychlé „co k tomu Urza říkal“; pro vlastní syntézu použij research_topic.
+        channel: UC id / @handle / 'primary' / nic = všechny kanály.
         """
         return rag_answer(cfg, db, question, embed_query=embed_fn(), max_passages=max(1, min(max_passages, 20)),
-                          context_s=float(max(20, min(context_seconds, 600))))
+                          context_s=float(max(20, min(context_seconds, 600))), channel_id=_channel_id(channel))
 
     @mcp.tool()
     def get_transcript(video_id: str, start_s: float | None = None, end_s: float | None = None) -> dict:
@@ -98,27 +116,33 @@ def build_mcp(cfg: Config | None = None, db=None) -> MCPServer:
                 break
             segs.append({"timestamp": format_timestamp(s["start"]), "start": s["start"], "text": s["text"],
                          "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"})
+        from .db import channel_dict
         return {"video_id": video_id, "title": v["title"], "url": f"https://www.youtube.com/watch?v={video_id}",
+                "channel": channel_dict(db.get_channel(v["channel_id"])),
                 "published_at": v["published_at"], "duration_s": v["duration_s"],
                 "transcript_status": v["transcript_status"], "segments": segs}
 
     @mcp.tool()
-    def list_videos(page: int = 1, per_page: int = 50, status: str = "done") -> dict:
-        """Seznam videí kanálu (nejnovější první). status: done (výchozí, jen videa s přepisem) | pending | queued | missing | failed | all."""
+    def list_videos(page: int = 1, per_page: int = 50, status: str = "done", channel: str | None = None) -> dict:
+        """Seznam videí (nejnovější první). status: done (výchozí, jen videa s přepisem) | pending | queued | missing | failed | all.
+        channel: UC id / @handle / 'primary' / nic = všechny kanály; u každého videa je channel_id."""
         per_page = max(1, min(per_page, 200))
         st = None if status == "all" else status
-        rows = db.list_videos(status=st, limit=per_page, offset=(max(page, 1) - 1) * per_page)
-        return {"total": db.count_videos(status=st), "page": page, "items": [
-            {"video_id": r["id"], "title": r["title"], "url": f"https://www.youtube.com/watch?v={r['id']}",
+        cid = _channel_id(channel)
+        rows = db.list_videos(channel_id=cid, status=st, limit=per_page, offset=(max(page, 1) - 1) * per_page)
+        return {"total": db.count_videos(channel_id=cid, status=st), "page": page, "channel": cid, "items": [
+            {"video_id": r["id"], "channel_id": r["channel_id"], "title": r["title"], "url": f"https://www.youtube.com/watch?v={r['id']}",
              "published_at": r["published_at"], "duration_s": r["duration_s"],
              "transcript_status": r["transcript_status"]} for r in rows]}
 
     @mcp.tool()
     def channel_info() -> dict:
-        """Název a URL indexovaného kanálu + statistiky indexu (počet videí, transkriptů, hodin)."""
+        """Primární kanál instance (id, name, url), celkové statistiky indexu a seznam všech kanálů v indexu
+        (id, name, url, handle, počty videí). Hodnoty id/handle se používají v parametru channel ostatních nástrojů."""
+        from .db import channel_dict
         ch = db.get_channel(cfg.channel.id or None)
-        return {"id": ch["id"] if ch else None, "name": ch["name"] if ch else name,
-                "url": ch["url"] if ch else cfg.channel.url, "stats": db.stats()}
+        return {**(channel_dict(ch) or {"id": None, "name": name, "url": cfg.channel.url, "handle": None}),
+                "stats": db.stats(), "channels": db.channel_stats()}
 
     return mcp
 

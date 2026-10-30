@@ -31,9 +31,10 @@ def parse_gaps(transcript_error: str | None) -> list[dict]:
         return []
 
 
-def video_record(r) -> dict:
+def video_record(r, channel: dict | None = None) -> dict:
     return {
-        "video_id": r["id"], "title": r["title"], "description": r["description"] or "",
+        "video_id": r["id"], "channel_id": r["channel_id"], "channel": channel,
+        "title": r["title"], "description": r["description"] or "",
         "url": f"https://www.youtube.com/watch?v={r['id']}", "thumbnail": r["thumbnail_url"],
         "published_at": r["published_at"], "duration_s": r["duration_s"], "view_count": r["view_count"],
         "position": r["position"], "transcript_status": r["transcript_status"],
@@ -61,10 +62,12 @@ def write_export(db, out_dir: str | os.PathLike, version: str | None = None) -> 
     t0 = time.time()
     counts = {}
 
+    from .db import channel_dict
+    channels = {c["id"]: channel_dict(c) for c in db.list_channels()}
     with gzip.open(out / "videos.jsonl.gz", "wt", encoding="utf-8") as f:
         n = 0
         for r in db.list_videos(limit=10**7, order="position ASC"):
-            f.write(json.dumps(video_record(r), ensure_ascii=False) + "\n"); n += 1
+            f.write(json.dumps(video_record(r, channels.get(r["channel_id"])), ensure_ascii=False) + "\n"); n += 1
         counts["videos"] = n
 
     with gzip.open(out / "segments.jsonl.gz", "wt", encoding="utf-8") as f:
@@ -77,9 +80,10 @@ def write_export(db, out_dir: str | os.PathLike, version: str | None = None) -> 
     ids: list[int] = []
     with gzip.open(out / "chunks.jsonl.gz", "wt", encoding="utf-8") as f:
         n = 0
-        for r in db.conn.execute('SELECT id, video_id, idx, start, "end", text, embedded FROM chunks ORDER BY id'):
-            f.write(json.dumps({"chunk_id": r[0], "video_id": r[1], "idx": r[2], "start": r[3], "end": r[4],
-                                "text": r[5], "embedded": bool(r[6])}, ensure_ascii=False) + "\n")
+        for r in db.conn.execute('SELECT c.id, c.video_id, c.idx, c.start, c."end", c.text, c.embedded, v.channel_id '
+                                 'FROM chunks c JOIN videos v ON v.id = c.video_id ORDER BY c.id'):
+            f.write(json.dumps({"chunk_id": r[0], "video_id": r[1], "channel_id": r[7], "idx": r[2], "start": r[3],
+                                "end": r[4], "text": r[5], "embedded": bool(r[6])}, ensure_ascii=False) + "\n")
             n += 1
         counts["chunks"] = n
 
@@ -96,17 +100,19 @@ def write_export(db, out_dir: str | os.PathLike, version: str | None = None) -> 
 
     ch = db.get_channel()
     manifest = {
-        "schema": 1, "ytindex": __version__,
+        "schema": 2, "ytindex": __version__,
         "version": version or index_version(db),
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "channel": {"id": ch["id"], "name": ch["name"], "url": ch["url"]} if ch else None,
+        "channel": channels.get(ch["id"]) if ch else None,   # primární kanál (zpětná kompatibilita)
+        "channels": db.channel_stats(),
         "counts": counts,
         "embedding": {"model": db.get_meta("embedding_model") or "gemini-embedding-001", "dim": dim,
                       "normalized": True, "metric": "cosine", "task_type_documents": "RETRIEVAL_DOCUMENT",
                       "task_type_query": "RETRIEVAL_QUERY"},
         "files": {},
         "notes": "segments = přepis (zdroj pravdy); chunks = úseky pro hledání (překryv 1 segment); "
-                 "embeddings.npy[i] patří k chunk_ids.npy[i]; odkaz na čas: https://www.youtube.com/watch?v={video_id}&t={int(start)}s",
+                 "embeddings.npy[i] patří k chunk_ids.npy[i]; odkaz na čas: https://www.youtube.com/watch?v={video_id}&t={int(start)}s; "
+                 "každé video a chunk nese channel_id (kanál v poli channels / videos[].channel)",
     }
     for name in FILES:
         p = out / name

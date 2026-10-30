@@ -24,6 +24,7 @@ class Passage:
     url: str
     text: str
     score: float
+    channel: dict | None = None
 
 
 # „Co si Urza myslí o X?“ → hledat jen X: jméno mluvčího a tázací rámec jinak táhnou k úvodům videí,
@@ -42,14 +43,14 @@ def topic_from_question(question: str) -> str:
 
 
 def gather_context(db, question: str, embed_query=None, max_passages: int = 8, context_s: float = 90.0,
-                   per_video: int = 3, mode: str = "hybrid") -> list[Passage]:
+                   per_video: int = 3, mode: str = "hybrid", channel_id: str | None = None) -> list[Passage]:
     """Najde nejrelevantnější místa a každé rozšíří o okolní řeč (±context_s/2), aby šlo citovat celou myšlenku.
 
     Diverzita: pasáže se berou střídavě z nejlepších videí (round-robin), překrývající se pasáže se slučují.
     """
     topic = topic_from_question(question)
     hits = search(db, topic, limit=max(3, max_passages), mode=mode, embed_query=embed_query,
-                  per_video_matches=per_video)
+                  per_video_matches=per_video, channel_id=channel_id)
     # round-robin přes videa: 1. shoda z každého videa, pak 2. shoda …
     queue = []
     for k in range(per_video):
@@ -75,6 +76,7 @@ def gather_context(db, question: str, embed_query=None, max_passages: int = 8, c
             n=len(passages) + 1, video_id=h.video_id, title=h.title, published_at=h.published_at,
             start=start, end=end, timestamp=format_timestamp(start),
             url=f"https://www.youtube.com/watch?v={h.video_id}&t={int(start)}s", text=text, score=h.score,
+            channel=h.channel,
         ))
     return passages
 
@@ -94,9 +96,11 @@ Pasáže:
 """
 
 
-def answer(cfg, db, question: str, embed_query=None, max_passages: int = 8, context_s: float = 90.0) -> dict:
+def answer(cfg, db, question: str, embed_query=None, max_passages: int = 8, context_s: float = 90.0,
+           channel_id: str | None = None) -> dict:
     """RAG: pasáže → Gemini → odpověď s citacemi [n] + seznam citací s odkazy na čas."""
-    passages = gather_context(db, question, embed_query, max_passages=max_passages, context_s=context_s)
+    passages = gather_context(db, question, embed_query, max_passages=max_passages, context_s=context_s,
+                              channel_id=channel_id)
     if not passages:
         return {"question": question, "answer": "K této otázce v zaindexovaných videích nic nezaznělo.", "citations": []}
     if not cfg.gemini_api_key:
@@ -105,9 +109,11 @@ def answer(cfg, db, question: str, embed_query=None, max_passages: int = 8, cont
     from google import genai
     from google.genai import types
 
-    ch = db.get_channel(cfg.channel.id or None)
-    rendered = "\n\n".join(f"[{p.n}] {p.title} ({p.timestamp}):\n{p.text}" for p in passages)
-    prompt = _ANSWER_PROMPT.format(channel=ch["name"] if ch else cfg.channel.name, question=question, passages=rendered)
+    ch = db.get_channel(channel_id or cfg.channel.id or None)
+    names = sorted({p.channel["name"] for p in passages if p.channel and p.channel.get("name")}) or [ch["name"] if ch else cfg.channel.name]
+    rendered = "\n\n".join(f"[{p.n}] {p.title} ({p.timestamp}" + (f", {p.channel['name']}" if p.channel and len(names) > 1 else "") + f"):\n{p.text}"
+                           for p in passages)
+    prompt = _ANSWER_PROMPT.format(channel=", ".join(n for n in names if n), question=question, passages=rendered)
     client = genai.Client(api_key=cfg.gemini_api_key)
     resp = client.models.generate_content(
         model=cfg.gemini.answer_model, contents=prompt,

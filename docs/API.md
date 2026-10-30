@@ -5,10 +5,20 @@ Base URL: `https://ytindex-128410263808.europe-west1.run.app` · OpenAPI: `/open
 Všechny odpovědi jsou JSON (UTF‑8), všechny endpointy `GET`, CORS povolen. Časy jsou v sekundách od začátku videa,
 odkaz na místo ve videu je vždy `https://www.youtube.com/watch?v={video_id}&t={int(start)}s`.
 
+## 0. Kanály
+
+Index může obsahovat více YouTube kanálů. Každé video, výsledek hledání, pasáž i chunk nese odkud pochází:
+`channel_id` (UC…) a u videí/pasáží objekt `channel {id, name, url, handle}` (`url` je adresa kanálu, např.
+`https://www.youtube.com/@kanalsvobodnehopristavu`). Seznam kanálů s počty: `GET /api/channels` (pole `primary`
+= kanál, na který se omezuje web). Všechny endpointy přijímají `channel=<UC id | @handle | primary>`; bez parametru
+pracují nad všemi kanály. Export: `videos.jsonl.gz` má `channel_id` + `channel`, `chunks.jsonl.gz` má `channel_id`,
+manifest má `channels`.
+
 ## 1. Datový model
 
 ```
-video   (video_id, title, published_at, duration_s, transcript_status, transcript_source, gaps, updated_at)
+channel (id, name, url, handle)
+  └─ video   (video_id, channel_id, title, published_at, duration_s, transcript_status, transcript_source, gaps, updated_at)
   └─ segments  přepis = zdroj pravdy: (idx, start, duration, text), seřazeno podle času
   └─ chunks    úseky ~450 znaků pro hledání, překryv 1 segment: (chunk_id, idx, start, end, text, embedding)
 ```
