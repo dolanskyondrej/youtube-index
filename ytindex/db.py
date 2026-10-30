@@ -57,9 +57,11 @@ CREATE TABLE IF NOT EXISTS chunks (
     start REAL NOT NULL,
     end REAL NOT NULL,
     text TEXT NOT NULL,
-    embedded INTEGER NOT NULL DEFAULT 0
+    embedded INTEGER NOT NULL DEFAULT 0,
+    channel_id TEXT                      -- denormalizováno z videos kvůli rychlému filtru kanálu
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_video ON chunks(video_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_channel ON chunks(channel_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
 
 -- Fulltext: unicode61 + remove_diacritics 2 => 'svoboda' najde i 'SVOBODA', 'prístav' najde 'přístav'
@@ -140,6 +142,13 @@ class Database:
         ccols = {r[1] for r in self.conn.execute("PRAGMA table_info(channels)")}
         if "handle" not in ccols:
             self.conn.execute("ALTER TABLE channels ADD COLUMN handle TEXT")
+        chcols = {r[1] for r in self.conn.execute("PRAGMA table_info(chunks)")}
+        if "channel_id" not in chcols:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN channel_id TEXT")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_channel ON chunks(channel_id)")
+        if self.conn.execute("SELECT 1 FROM chunks WHERE channel_id IS NULL LIMIT 1").fetchone():
+            self.conn.execute("UPDATE chunks SET channel_id = (SELECT channel_id FROM videos WHERE videos.id = chunks.video_id) "
+                              "WHERE channel_id IS NULL")
         if self.vec_available:
             stored = self.get_meta("embedding_dim")
             if stored and int(stored) != self.embedding_dim:
@@ -271,9 +280,11 @@ class Database:
                 "INSERT INTO segments(video_id, idx, start, duration, text) VALUES (?,?,?,?,?)",
                 [(video_id, i, s.start, s.duration, s.text) for i, s in enumerate(segments)],
             )
+            row = c.execute("SELECT channel_id FROM videos WHERE id=?", (video_id,)).fetchone()
+            channel_id = row["channel_id"] if row else None
             c.executemany(
-                "INSERT INTO chunks(video_id, idx, start, end, text) VALUES (?,?,?,?,?)",
-                [(video_id, i, ch.start, ch.end, ch.text) for i, ch in enumerate(chunks)],
+                "INSERT INTO chunks(video_id, idx, start, end, text, channel_id) VALUES (?,?,?,?,?,?)",
+                [(video_id, i, ch.start, ch.end, ch.text, channel_id) for i, ch in enumerate(chunks)],
             )
             c.execute(
                 "UPDATE videos SET transcript_status='done', transcript_source=?, transcript_lang=?, "
@@ -378,34 +389,66 @@ class Database:
     # ---------- vyhledávací primitiva (stejné rozhraní má PostgresDatabase) ----------
     backend = "sqlite"
 
-    _CHANNEL_SUB = "(SELECT c.id FROM chunks c JOIN videos v ON v.id = c.video_id WHERE v.channel_id = ?)"
+    def _only_channel(self) -> str | None:
+        """ID kanálu, pokud je v indexu právě jeden (filtr je pak zbytečný)."""
+        rows = self.conn.execute("SELECT id FROM channels LIMIT 2").fetchall()
+        return rows[0]["id"] if len(rows) == 1 else None
+
+    def _filter_channel(self, ids: list[int], channel_id: str) -> set[int]:
+        if not ids:
+            return set()
+        out: set[int] = set()
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            out.update(r[0] for r in self.conn.execute(
+                f"SELECT id FROM chunks WHERE channel_id = ? AND id IN ({','.join('?' * len(part))})", (channel_id, *part)))
+        return out
 
     def fts_hits(self, q: str, mode: str, limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
-        """[(chunk_id, rank)] seřazené od nejlepšího. mode: and | or. channel_id omezí na jeden kanál."""
+        """[(chunk_id, rank)] seřazené od nejlepšího. mode: and | or. channel_id omezí na jeden kanál.
+
+        Filtr kanálu se dělá až nad kandidáty (FTS5 s `rowid IN (subdotaz)` trvá minuty); při nedostatku
+        výsledků se kandidáti rozšíří.
+        """
         fts_query = build_fts_query(q, mode)
         if not fts_query:
             return []
-        sql = "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ?"
-        params: list = [fts_query]
-        if channel_id:
-            sql += f" AND rowid IN {self._CHANNEL_SUB}"; params.append(channel_id)
-        sql += " ORDER BY r LIMIT ?"; params.append(limit)
-        try:
-            rows = self.conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        return [(r["rowid"], r["r"]) for r in rows]
+        if channel_id and channel_id == self._only_channel():
+            channel_id = None
+        for factor in ((1,) if not channel_id else (4, 25)):
+            try:
+                rows = self.conn.execute(
+                    "SELECT rowid, bm25(chunks_fts) AS r FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY r LIMIT ?",
+                    (fts_query, limit * factor),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            if not channel_id:
+                return [(r["rowid"], r["r"]) for r in rows]
+            keep = self._filter_channel([r["rowid"] for r in rows], channel_id)
+            hits = [(r["rowid"], r["r"]) for r in rows if r["rowid"] in keep]
+            if len(hits) >= limit or len(rows) < limit * factor:
+                return hits[:limit]
+        return hits[:limit]
 
     def vec_hits(self, qvec: list[float], limit: int, channel_id: str | None = None) -> list[tuple[int, float]]:
-        """[(chunk_id, cosine_distance)] seřazené od nejbližšího."""
+        """[(chunk_id, cosine_distance)] seřazené od nejbližšího; filtr kanálu post-filtrem jako u FTS."""
         if not self.vec_available:
             return []
-        sql = "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ?"
-        params: list = [serialize_f32(qvec), limit]
-        if channel_id:
-            sql += f" AND chunk_id IN {self._CHANNEL_SUB}"; params.append(channel_id)
-        rows = self.conn.execute(sql + " ORDER BY distance", params).fetchall()
-        return [(r["chunk_id"], r["distance"]) for r in rows]
+        if channel_id and channel_id == self._only_channel():
+            channel_id = None
+        for factor in ((1,) if not channel_id else (4, 25)):
+            rows = self.conn.execute(
+                "SELECT chunk_id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (serialize_f32(qvec), limit * factor),
+            ).fetchall()
+            if not channel_id:
+                return [(r["chunk_id"], r["distance"]) for r in rows]
+            keep = self._filter_channel([r["chunk_id"] for r in rows], channel_id)
+            hits = [(r["chunk_id"], r["distance"]) for r in rows if r["chunk_id"] in keep]
+            if len(hits) >= limit or len(rows) < limit * factor:
+                return hits[:limit]
+        return hits[:limit]
 
     def snippet(self, chunk_id: int, q: str, mode: str) -> str | None:
         """Úryvek se <mark> značkami, nebo None pokud chunk dotazu lexikálně neodpovídá."""
