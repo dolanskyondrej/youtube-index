@@ -90,6 +90,9 @@ Nikdy nespouštět dva ingest/batch běhy nad stejným indexem souběžně.
 
 ## API (kontrakt pro libovolný frontend)
 
+Podrobná specifikace pro vývojáře (datový model, verze indexu, hromadné stažení, inkrementální synchronizace,
+ukázkový klient): **[docs/API.md](docs/API.md)**. Totéž stručně v OpenAPI popisu na `/docs`.
+
 Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat TypeScript/Swift klienty).
 
 | Endpoint | Popis |
