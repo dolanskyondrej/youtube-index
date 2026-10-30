@@ -40,7 +40,8 @@ cosine; dotazy embeduj s `task_type=RETRIEVAL_QUERY`). Odkaz na místo ve videu:
 
 **Verze indexu:** každá odpověď `/api/*` nese hlavičku `X-Index-Version`. Změna hodnoty = nová data.
 
-**Autentizace:** `/api/export/files/*`, `/api/chunks`, `/api/changes` vyžadují hlavičku `X-Api-Key`.
+**Autentizace:** jen hromadné cesty vyžadují hlavičku `X-Api-Key`: `/api/export/files/*`, `/api/chunks` bez
+`video_id`, `/api/changes`. Vše k jednomu videu (včetně úseků a embeddingů) je bez klíče.
 
 **Limity:** per IP, při překročení `429` + `Retry-After` (s).
 
@@ -209,7 +210,7 @@ class SegmentOut(BaseModel):
 class VideoDetailOut(VideoOut):
     description: str
     segments: list[SegmentOut] = Field(description="Celý přepis s časy (zdroj pravdy)")
-    chunks: list[ChunkOut] | None = Field(None, description="Úseky pro hledání; jen s `with_chunks=1` (embeddingy s `with_embeddings=1` + X-Api-Key)")
+    chunks: list[ChunkOut] | None = Field(None, description="Úseky pro hledání; jen s `with_chunks=1` (embeddingy s `with_embeddings=1`)")
     embedding_dim: int | None = None
     index_version: str | None = None
 
@@ -411,15 +412,19 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]
 
-    @app.get("/api/chunks", response_model=ChunkListOut, dependencies=[Depends(require_api_key)],
-             tags=["hromadný přístup"], summary="Úseky s embeddingy (kurzor)")
-    def chunks(video_id: str | None = Query(None), after: int = Query(0, ge=0, description="kurzor: poslední chunk_id"),
+    @app.get("/api/chunks", response_model=ChunkListOut, tags=["hromadný přístup"], summary="Úseky s embeddingy (kurzor)")
+    def chunks(video_id: str | None = Query(None, description="jen úseky jednoho videa (bez klíče)"),
+               after: int = Query(0, ge=0, description="kurzor: poslední chunk_id"),
                limit: int = Query(500, ge=1, le=2000),
                with_embeddings: bool = Query(False, description="přidat embedding (base64 float32)"),
-               channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')")):
+               channel: str | None = Query(None, description="Omezit na kanál (UC id, @handle, 'primary')"),
+               x_api_key: str | None = Header(None, alias="X-Api-Key")):
         """Úseky seřazené podle `chunk_id`, stránkování kurzorem: další stránka = `after=next_after`, konec = `next_after` null.
         `with_embeddings=1` přidá `embedding` jako base64 z 768 × float32 little‑endian (null, pokud ještě nebyl spočítán).
+        S `video_id` (jedno video) bez klíče; bez `video_id` jde o hromadné čtení a vyžaduje `X-Api-Key`.
         Pro celý index použij `/api/export` (NumPy je ~5× menší než JSON)."""
+        if not video_id and api_key and x_api_key != api_key:
+            raise HTTPException(401, "Hromadné čtení (bez video_id) vyžaduje X-Api-Key")
         rows = db.list_chunks(video_id=video_id, after=after, limit=limit, with_embeddings=with_embeddings,
                               channel_id=resolve_channel(channel))
         items = []
@@ -538,16 +543,13 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
     @app.get("/api/videos/{video_id}", response_model=VideoDetailOut, tags=["videa"], summary="Vše o jednom videu")
     def video_detail(video_id: str,
                      with_chunks: bool = Query(False, description="přidat úseky pro hledání (chunks)"),
-                     with_embeddings: bool = Query(False, description="k úsekům přidat embedding (base64 float32); vyžaduje X-Api-Key"),
-                     x_api_key: str | None = Header(None, alias="X-Api-Key")):
+                     with_embeddings: bool = Query(False, description="k úsekům přidat embedding (base64 float32)")):
         """Kompletní informace k videu v jednom volání: metadata, kanál, mezery v přepisu (`gaps`), celý přepis
-        (`segments`) a volitelně úseky (`chunks`) včetně embeddingů. Klient, který si zrcadlí jedno video, nepotřebuje
-        nic dalšího; `index_version` říká, ke které verzi indexu data patří."""
+        (`segments`) a volitelně úseky (`chunks`) včetně embeddingů. Bez API klíče. Klient, který si zrcadlí jedno video,
+        nepotřebuje nic dalšího; `index_version` říká, ke které verzi indexu data patří."""
         r = db.get_video(video_id)
         if not r:
             raise HTTPException(404, "Video nenalezeno")
-        if with_embeddings and api_key and x_api_key != api_key:
-            raise HTTPException(401, "Embeddingy vyžadují X-Api-Key")
         segs = [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]

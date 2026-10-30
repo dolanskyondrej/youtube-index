@@ -102,7 +102,7 @@ Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat 
 | `/api/ask?q=…` | odpověď Gemini sestavená jen z přepisů, s citacemi [n] a seznamem pasáží |
 | `/api/channels` | všechny kanály v indexu (id, name, url, handle, počty); `primary` = kanál webu |
 | `/api/videos?page=1&per_page=50&status=done&channel=` | seznam videí (status=all pro vše; pole `channel`, `gaps`, `updated_at`) |
-| `/api/videos/{id}?with_chunks=1&with_embeddings=1` | vše k jednomu videu: metadata, kanál, mezery, celý přepis, volitelně úseky s embeddingy (embeddingy s klíčem) |
+| `/api/videos/{id}?with_chunks=1&with_embeddings=1` | vše k jednomu videu: metadata, kanál, mezery, celý přepis, volitelně úseky s embeddingy (bez klíče) |
 | `/api/videos/{id}/segments` | jen přepis videa jako segmenty s časem |
 | `/api/export` | manifest hromadného exportu: verze indexu, počty, parametry embeddingů, odkazy na soubory |
 | `/api/export/files/{name}` | stažení exportu: `videos.jsonl.gz`, `segments.jsonl.gz`, `chunks.jsonl.gz`, `embeddings.npy` (float32 [N,768]), `chunk_ids.npy`, `manifest.json`, `index.sqlite` |
@@ -146,8 +146,8 @@ Každý výsledek hledání, video, pasáž i chunk vrací, z jakého kanálu je
 generation souboru v bucketu). Doporučený postup klienta: číst `/api/export`, při změně `index_version` stáhnout
 soubory z manifestu (JSONL + NumPy; `embeddings.npy[i]` patří k `chunk_ids.npy[i]`), nebo jen `/api/changes?since=`
 a pro změněná videa `/api/videos/{id}/segments` a `/api/chunks?video_id=…`. Export vyrábí `ytindex export`
-(po každé indexaci; `--gcs gs://bucket/export` ho nahraje). Hromadné cesty (`/api/chunks`, `/api/changes`,
-`/api/export/files/*`) lze chránit klíčem: env `YTINDEX_API_KEY`, hlavička `X-Api-Key`. Když je bucket veřejný
+(po každé indexaci; `--gcs gs://bucket/export` ho nahraje). Hromadné cesty (`/api/chunks` bez `video_id`, `/api/changes`,
+`/api/export/files/*`) chrání klíč: env `YTINDEX_API_KEY`, hlavička `X-Api-Key`; vše k jednomu videu je bez klíče. Když je bucket veřejný
 (`YTINDEX_EXPORT_PUBLIC=1`), manifest vrací přímé URL do Cloud Storage místo proxy přes službu. Proxy streamuje
 po 8 MB range requestech do GCS, bez `Content-Length` (Cloud Run jinak omezuje odpověď na 32 MB) a podporuje
 HTTP `Range` pro navazování (`X-Content-Size` nese velikost). Stažení 836 MB embeddingů trvá ~50 s.

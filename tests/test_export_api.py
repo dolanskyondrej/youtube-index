@@ -65,7 +65,7 @@ def test_video_detail_everything_in_one_call(cfg, db, monkeypatch):
     assert d["chunks"] is None and len(d["segments"]) == 3 and d["channel"]["id"] == cfg.channel.id and d["index_version"]
     d = c.get("/api/videos/vid00000002", params={"with_chunks": 1}).json()
     assert d["chunks"] and all(ch["video_id"] == "vid00000002" and ch.get("embedding") is None for ch in d["chunks"])
-    assert c.get("/api/videos/vid00000002", params={"with_embeddings": 1}).status_code == 401
-    d = c.get("/api/videos/vid00000002", params={"with_embeddings": 1}, headers={"X-Api-Key": "tajne"}).json()
+    assert c.get("/api/chunks", params={"video_id": "vid00000002"}).status_code == 200      # jedno video bez klíče
+    d = c.get("/api/videos/vid00000002", params={"with_embeddings": 1}).json()             # embeddingy videa bez klíče
     assert d["embedding_dim"] == db.embedding_dim and all(ch["embedding"] for ch in d["chunks"])
     assert struct.unpack("f", base64.b64decode(d["chunks"][0]["embedding"])[:4])[0] == 0.25

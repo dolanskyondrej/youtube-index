@@ -38,8 +38,9 @@ Index se mění jen při indexaci (nová videa, opravy). Každá odpověď `/api
 
 ## 3. Autentizace
 
-Hromadné cesty (`/api/export/files/*`, `/api/chunks`, `/api/changes`) vyžadují hlavičku `X-Api-Key: <klíč>`;
-bez ní vrací `401`. Hledání, metadata videí, přepisy a manifest jsou bez klíče.
+Klíč je jen pro hromadné stahování: `/api/export/files/*`, `/api/chunks` **bez** `video_id` a `/api/changes`
+vyžadují hlavičku `X-Api-Key: <klíč>`, jinak `401`. Všechno ostatní je bez klíče: hledání, manifest, seznam videí a
+**vše k jednomu videu** (`/api/videos/{id}` včetně `with_chunks=1&with_embeddings=1`, `/api/chunks?video_id=…`).
 
 ## 4. Limity
 
@@ -72,11 +73,11 @@ Token bucket na IP (`429` + `Retry-After` v sekundách): hledání 60/min, `/api
 1. GET /api/changes?since=<poslední updated_at>&limit=500        (X-Api-Key)
      → items = videa s updated_at > since (nejstarší první), next_since = kurzor
      opakuj se since=next_since, dokud next_since != null
-2. pro každé změněné video jedno volání:
-     GET /api/videos/{id}?with_chunks=1&with_embeddings=1   (X-Api-Key)
+2. pro každé změněné video jedno volání (bez klíče):
+     GET /api/videos/{id}?with_chunks=1&with_embeddings=1
        → metadata, channel, gaps, segments (přepis), chunks s embeddingy, index_version
      (embedding = base64 ze 768 × float32 little‑endian; null, pokud ještě nebyl spočítán;
-      bez embeddingů klíč není potřeba; `/api/chunks?video_id=` zůstává jako alternativa se stránkováním)
+      `/api/chunks?video_id=…&with_embeddings=1` je alternativa se stránkováním, také bez klíče)
 3. ulož max(updated_at) jako nový since
 ```
 
