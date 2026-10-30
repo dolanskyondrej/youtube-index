@@ -404,6 +404,21 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             raise HTTPException(404, "Soubor neexistuje")
         return FileResponse(p, filename=name)
 
+    @app.get("/api/videos/{video_id}", response_model=VideoDetailOut)
+    def video_detail(video_id: str):
+        r = db.get_video(video_id)
+        if not r:
+            raise HTTPException(404, "Video nenalezeno")
+        segs = [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
+                 "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
+                for s in db.get_segments(video_id)]
+        return {**_video_out(r), "description": r["description"] or "", "segments": segs}
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        ico = WEB_DIR / "favicon.ico"
+        return FileResponse(ico, media_type="image/x-icon") if ico.exists() else Response(status_code=204)
+
     @app.get("/", include_in_schema=False)
     def index():
         return FileResponse(WEB_DIR / "index.html")
