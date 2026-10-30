@@ -138,7 +138,9 @@ soubory z manifestu (JSONL + NumPy; `embeddings.npy[i]` patří k `chunk_ids.npy
 a pro změněná videa `/api/videos/{id}/segments` a `/api/chunks?video_id=…`. Export vyrábí `ytindex export`
 (po každé indexaci; `--gcs gs://bucket/export` ho nahraje). Hromadné cesty (`/api/chunks`, `/api/changes`,
 `/api/export/files/*`) lze chránit klíčem: env `YTINDEX_API_KEY`, hlavička `X-Api-Key`. Když je bucket veřejný
-(`YTINDEX_EXPORT_PUBLIC=1`), manifest vrací přímé URL do Cloud Storage místo proxy přes službu.
+(`YTINDEX_EXPORT_PUBLIC=1`), manifest vrací přímé URL do Cloud Storage místo proxy přes službu. Proxy streamuje
+po 8 MB range requestech do GCS, bez `Content-Length` (Cloud Run jinak omezuje odpověď na 32 MB) a podporuje
+HTTP `Range` pro navazování (`X-Content-Size` nese velikost). Stažení 836 MB embeddingů trvá ~50 s.
 Víc kanálů = víc instancí (každý kanál má vlastní `ytindex.toml` + DB), API je na kanálu nezávislé.
 
 ## Google Cloud (produkční nasazení, < 1 USD/měsíc)
