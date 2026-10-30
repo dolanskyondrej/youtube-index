@@ -97,7 +97,12 @@ Vše `GET`, JSON, CORS povolen, schéma v `/openapi.json` (lze z něj generovat 
 | `/api/search?q=…&limit=20&mode=hybrid\|fts\|vector&per_video=3` | hlavní hledání; výsledky seskupené po videích |
 | `/api/context?q=…&max_passages=8&context_seconds=90` | rešerše pro psaní: souvislé pasáže k tématu (shoda + okolní řeč, střídavě z videí), s čísly citací a odkazy na čas |
 | `/api/ask?q=…` | odpověď Gemini sestavená jen z přepisů, s citacemi [n] a seznamem pasáží |
-| `/api/videos?page=1&per_page=50&status=done` | seznam videí kanálu |
+| `/api/videos?page=1&per_page=50&status=done` | seznam videí kanálu (status=all pro vše; pole `gaps`, `updated_at`) |
+| `/api/videos/{id}/segments` | celý přepis videa jako segmenty s časem |
+| `/api/export` | manifest hromadného exportu: verze indexu, počty, parametry embeddingů, odkazy na soubory |
+| `/api/export/files/{name}` | stažení exportu: `videos.jsonl.gz`, `segments.jsonl.gz`, `chunks.jsonl.gz`, `embeddings.npy` (float32 [N,768]), `chunk_ids.npy`, `manifest.json`, `index.sqlite` |
+| `/api/chunks?video_id=&after=&limit=500&with_embeddings=1` | hromadné čtení úseků kurzorem, embedding jako base64 float32 |
+| `/api/changes?since=<ISO>` | videa změněná od času (inkrementální synchronizace; `next_since` pro další stránku) |
 | `/api/videos/{id}` | detail videa včetně celého transkriptu (segmenty s časy a odkazy) |
 | `/api/channel` | název, URL a statistiky indexu |
 | `/health` | liveness |
@@ -126,6 +131,14 @@ Příklad odpovědi `/api/search?q=bitcoin`:
 ```
 
 `highlighted` obsahuje **pouze** značky `<mark>`; frontend zbytek escapuje (viz `ytindex/web/index.html`).
+
+**Hromadné stahování celého obsahu.** Každá odpověď `/api/*` nese hlavičku `X-Index-Version` (verze indexu =
+generation souboru v bucketu). Doporučený postup klienta: číst `/api/export`, při změně `index_version` stáhnout
+soubory z manifestu (JSONL + NumPy; `embeddings.npy[i]` patří k `chunk_ids.npy[i]`), nebo jen `/api/changes?since=`
+a pro změněná videa `/api/videos/{id}/segments` a `/api/chunks?video_id=…`. Export vyrábí `ytindex export`
+(po každé indexaci; `--gcs gs://bucket/export` ho nahraje). Hromadné cesty (`/api/chunks`, `/api/changes`,
+`/api/export/files/*`) lze chránit klíčem: env `YTINDEX_API_KEY`, hlavička `X-Api-Key`. Když je bucket veřejný
+(`YTINDEX_EXPORT_PUBLIC=1`), manifest vrací přímé URL do Cloud Storage místo proxy přes službu.
 Víc kanálů = víc instancí (každý kanál má vlastní `ytindex.toml` + DB), API je na kanálu nezávislé.
 
 ## Google Cloud (produkční nasazení, < 1 USD/měsíc)

@@ -205,6 +205,20 @@ def _gcs_pull(cfg: Config) -> str | None:
     return gs
 
 
+def _stamp_version(db, gs: str | None) -> None:
+    """Uloží verzi indexu (GCS generation) do meta, aby ji API vracelo v X-Index-Version."""
+    if not gs:
+        return
+    try:
+        from .gcs import generation
+        gen = generation(gs)
+        if gen:
+            db.set_meta("index_version", str(gen))
+            db.conn.commit()
+    except Exception as e:
+        log.warning("verze indexu: %s", e)
+
+
 def cmd_cloud_ingest(args) -> int:
     """Cloud Run Job: konfigurace z env (YTINDEX_CHANNEL, YTINDEX_GCS_DB nebo DATABASE_URL, GEMINI_API_KEY)."""
     from .db import open_database
@@ -247,6 +261,7 @@ def cmd_cloud_serve(args) -> int:
     gs = _gcs_pull(cfg)
     db = ReloadableDatabase(open_database(cfg))
     _ensure_channel(cfg, db)
+    _stamp_version(db, gs)
 
     if gs:
         # index se v bucketu mění během indexace – každých N minut zkontrolovat verzi a případně vyměnit
@@ -264,6 +279,7 @@ def cmd_cloud_serve(args) -> int:
                         new_path = f"{cfg.db_path}.{gen}"
                         download(gs, new_path)
                         new_db = open_database(cfg, url=new_path)
+                        new_db.set_meta("index_version", str(gen)); new_db.conn.commit()
                         old_path = db.path
                         db.swap(new_db)
                         state["gen"] = gen
@@ -404,6 +420,23 @@ def cmd_batch(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    """Hromadný export (JSONL + NumPy + manifest) pro jiné systémy; volitelně nahrání do veřejného bucketu."""
+    from .db import open_database
+    from .export import upload_export, write_export
+
+    cfg = load_config()
+    db = open_database(cfg)
+    gs = args.gcs or os.environ.get("YTINDEX_EXPORT_GCS", "")
+    version = args.version or db.get_meta("index_version")
+    m = write_export(db, args.out, version=version)
+    print(f"✔ Export {m['version']}: {json.dumps(m['counts'])} za {m['elapsed_s']} s → {args.out}")
+    if gs:
+        urls = upload_export(args.out, gs)
+        print("✔ Nahráno:", urls["manifest.json"])
+    return 0
+
+
 def cmd_quality(args) -> int:
     """Najde zacyklené přepisy (stejné slovo/fráze opakovaně) a volitelně je označí k novému přepisu."""
     from . import quality
@@ -540,6 +573,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--gcs", action="store_true", help="pracovat s indexem v YTINDEX_GCS_DB (stáhnout před, nahrát po)")
     s.add_argument("--reason", help="fill-gaps: doplnit jen mezery s tímto důvodem (např. loop)")
     s.set_defaults(fn=cmd_batch)
+
+    s = sub.add_parser("export", help="hromadný export indexu (JSONL, NumPy embeddingy, manifest) pro jiné systémy")
+    s.add_argument("--out", default="data/export")
+    s.add_argument("--gcs", help="gs://bucket/prefix – nahrát export (veřejný bucket); výchozí env YTINDEX_EXPORT_GCS")
+    s.add_argument("--version", help="verze indexu do manifestu (výchozí meta index_version nebo otisk obsahu)")
+    s.set_defaults(fn=cmd_export)
 
     s = sub.add_parser("quality", help="kontrola přepisů: zacyklená slova/fráze; --mark označí okna k novému přepisu")
     s.add_argument("action", choices=["scan"])

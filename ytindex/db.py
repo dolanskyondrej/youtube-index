@@ -290,6 +290,38 @@ class Database:
             (video_id,)).fetchall()
         return {r["idx"]: list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])) for r in rows}
 
+    # ---------- hromadný přístup (export, /api/chunks, /api/changes) ----------
+    def iter_embeddings(self):
+        """Generátor (chunk_id, vektor) pro všechny embedované chunky, v pořadí chunk_id."""
+        if not self.vec_available:
+            return iter(())
+        return ((r["chunk_id"], list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])))
+                for r in self.conn.execute("SELECT chunk_id, embedding FROM chunk_vec ORDER BY chunk_id"))
+
+    def list_chunks(self, video_id: str | None = None, after: int = 0, limit: int = 500,
+                    with_embeddings: bool = False) -> list[dict]:
+        where, params = ["c.id > ?"], [after]
+        if video_id:
+            where.append("c.video_id = ?"); params.append(video_id)
+        sql = ('SELECT c.id, c.video_id, c.idx, c.start, c.end, c.text, c.embedded'
+               + (', v.embedding' if with_embeddings and self.vec_available else ', NULL AS embedding')
+               + ' FROM chunks c'
+               + (' LEFT JOIN chunk_vec v ON v.chunk_id = c.id' if with_embeddings and self.vec_available else '')
+               + ' WHERE ' + ' AND '.join(where) + ' ORDER BY c.id LIMIT ?')
+        out = []
+        for r in self.conn.execute(sql, (*params, limit)):
+            d = {"chunk_id": r["id"], "video_id": r["video_id"], "idx": r["idx"], "start": r["start"], "end": r["end"],
+                 "text": r["text"], "embedded": bool(r["embedded"])}
+            if with_embeddings:
+                d["embedding"] = list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])) if r["embedding"] else None
+            out.append(d)
+        return out
+
+    def videos_changed_since(self, since: str, limit: int = 1000) -> list[sqlite3.Row]:
+        """Videa s updated_at > since (ISO/`YYYY-MM-DD HH:MM:SS`), nejstarší změna první."""
+        return self.conn.execute(
+            "SELECT * FROM videos WHERE updated_at > ? ORDER BY updated_at, id LIMIT ?", (since, limit)).fetchall()
+
     # ---------- vyhledávací primitiva (stejné rozhraní má PostgresDatabase) ----------
     backend = "sqlite"
 

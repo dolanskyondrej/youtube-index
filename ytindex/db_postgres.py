@@ -255,6 +255,32 @@ class PostgresDatabase:
         rows = self._all("SELECT idx, embedding FROM chunks WHERE video_id=%s AND embedding IS NOT NULL", (video_id,))
         return {r["idx"]: [float(x) for x in r["embedding"]] for r in rows}
 
+    # ---------- hromadný přístup ----------
+    def iter_embeddings(self):
+        for r in self._all("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL ORDER BY id"):
+            yield r["id"], [float(x) for x in r["embedding"]]
+
+    def list_chunks(self, video_id: str | None = None, after: int = 0, limit: int = 500,
+                    with_embeddings: bool = False) -> list[dict]:
+        where, params = ["id > %s"], [after]
+        if video_id:
+            where.append("video_id = %s"); params.append(video_id)
+        rows = self._all('SELECT id, video_id, idx, start, "end", text, embedding IS NOT NULL AS embedded'
+                         + (', embedding' if with_embeddings else '')
+                         + ' FROM chunks WHERE ' + ' AND '.join(where) + ' ORDER BY id LIMIT %s', (*params, limit))
+        out = []
+        for r in rows:
+            d = {"chunk_id": r["id"], "video_id": r["video_id"], "idx": r["idx"], "start": r["start"], "end": r["end"],
+                 "text": r["text"], "embedded": bool(r["embedded"])}
+            if with_embeddings:
+                d["embedding"] = [float(x) for x in r["embedding"]] if r["embedding"] is not None else None
+            out.append(d)
+        return out
+
+    def videos_changed_since(self, since: str, limit: int = 1000):
+        return self._all("SELECT * FROM videos WHERE updated_at > %s::timestamptz ORDER BY updated_at, id LIMIT %s",
+                         (since, limit))
+
     # ---------- vyhledávací primitiva ----------
     def fts_hits(self, q: str, mode: str, limit: int) -> list[tuple[int, float]]:
         tsq = build_tsquery(q, mode)

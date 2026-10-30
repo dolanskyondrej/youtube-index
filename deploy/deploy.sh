@@ -56,7 +56,9 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" --member "service
 echo "▶ Build image (Cloud Build)"
 gcloud builds submit --tag "$IMAGE" --quiet .
 
-ENV_VARS="YTINDEX_CHANNEL=${CHANNEL},YTINDEX_GCS_DB=${GCS_DB}"
+ENV_VARS="YTINDEX_CHANNEL=${CHANNEL},YTINDEX_GCS_DB=${GCS_DB},YTINDEX_EXPORT_GCS=gs://${BUCKET}/export"
+[ -n "${YTINDEX_API_KEY:-}" ] && ENV_VARS="${ENV_VARS},YTINDEX_API_KEY=${YTINDEX_API_KEY}"
+[ "${EXPORT_PUBLIC:-0}" = "1" ] && ENV_VARS="${ENV_VARS},YTINDEX_EXPORT_PUBLIC=1"
 [ -n "$YOUTUBE_API_KEY" ] && ENV_VARS="${ENV_VARS},YOUTUBE_API_KEY=${YOUTUBE_API_KEY}"
 [ -n "$YTINDEX_LIMIT" ] && ENV_VARS="${ENV_VARS},YTINDEX_LIMIT=${YTINDEX_LIMIT}"
 SECRETS="GEMINI_API_KEY=ytindex-gemini-key:latest"

@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
 from .db import open_database
+from .export import FILES, embedding_b64, index_version, open_gcs_file, parse_gaps, public_urls, read_manifest_gcs
 from .ratelimit import rate_limit_middleware
 from .research import answer as rag_answer, gather_context
 from .search import hit_to_dict, search
@@ -82,6 +84,12 @@ class AskOut(BaseModel):
     citations: list[PassageOut]
 
 
+class GapOut(BaseModel):
+    start: int
+    end: int
+    reason: str
+
+
 class VideoOut(BaseModel):
     video_id: str
     title: str
@@ -93,6 +101,48 @@ class VideoOut(BaseModel):
     transcript_status: str
     transcript_source: str | None
     transcript_lang: str | None
+    gaps: list[GapOut] = Field(default_factory=list, description="Okna přepisu, která chybí (odmítnutá modelem apod.)")
+    updated_at: str | None = None
+
+
+class ChunkOut(BaseModel):
+    chunk_id: int
+    video_id: str
+    idx: int
+    start: float
+    end: float
+    text: str
+    embedded: bool
+    embedding: str | None = Field(None, description="base64 float32[dim] little-endian (jen s with_embeddings=1)")
+
+
+class ChunkListOut(BaseModel):
+    index_version: str
+    embedding_dim: int
+    next_after: int | None = Field(description="Kurzor pro další stránku (chunk_id), null = konec")
+    items: list[ChunkOut]
+
+
+class ChangesOut(BaseModel):
+    index_version: str
+    since: str
+    next_since: str | None = Field(description="updated_at posledního vráceného videa; pošli jako since v dalším volání")
+    items: list[VideoOut]
+
+
+class ExportFileOut(BaseModel):
+    url: str
+    size: int | None = None
+    sha256: str | None = None
+
+
+class ExportOut(BaseModel):
+    index_version: str
+    generated_at: str | None
+    counts: dict | None
+    embedding: dict | None
+    files: dict[str, ExportFileOut] = Field(description="videos.jsonl.gz, segments.jsonl.gz, chunks.jsonl.gz, embeddings.npy, chunk_ids.npy, manifest.json")
+    notes: str | None = None
 
 
 class SegmentOut(BaseModel):
@@ -128,6 +178,7 @@ def _video_out(r) -> dict:
         "thumbnail": r["thumbnail_url"], "published_at": r["published_at"], "duration_s": r["duration_s"],
         "view_count": r["view_count"], "transcript_status": r["transcript_status"],
         "transcript_source": r["transcript_source"], "transcript_lang": r["transcript_lang"],
+        "gaps": parse_gaps(r["transcript_error"]), "updated_at": str(r["updated_at"]) if r["updated_at"] else None,
     }
 
 
@@ -165,9 +216,27 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
     app.router.routes.append(Route("/mcp", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
     app.router.routes.append(Route("/mcp/", endpoint=mcp_endpoint, methods=["GET", "POST", "DELETE"]))
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "DELETE"],
-                       allow_headers=["*"], expose_headers=["Mcp-Session-Id", "Retry-After"])
+                       allow_headers=["*"], expose_headers=["Mcp-Session-Id", "Retry-After", "X-Index-Version"])
     if rate_limit:
         app.middleware("http")(rate_limit_middleware)
+
+    @app.middleware("http")
+    async def add_index_version(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            try:
+                response.headers["X-Index-Version"] = index_version(db)
+            except Exception:
+                pass
+        return response
+
+    api_key = os.environ.get("YTINDEX_API_KEY", "")
+
+    def require_api_key(x_api_key: str | None = Header(None, alias="X-Api-Key")):
+        """Hromadné endpointy: pokud je nastaven YTINDEX_API_KEY, vyžadují hlavičku X-Api-Key."""
+        if api_key and x_api_key != api_key:
+            raise HTTPException(401, "Chybí nebo nesouhlasí X-Api-Key")
+        return True
 
     @lru_cache(maxsize=1)
     def embedder():
@@ -240,20 +309,100 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
         return {"total": db.count_videos(status=st), "page": page, "per_page": per_page,
                 "items": [_video_out(r) for r in rows]}
 
-    @app.get("/api/videos/{video_id}", response_model=VideoDetailOut)
-    def video_detail(video_id: str):
-        r = db.get_video(video_id)
-        if not r:
+    @app.get("/api/videos/{video_id}/segments", response_model=list[SegmentOut])
+    def video_segments(video_id: str):
+        """Celý přepis videa jako segmenty s časem (zdroj pravdy)."""
+        if not db.get_video(video_id):
             raise HTTPException(404, "Video nenalezeno")
-        segs = [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
+        return [{"start": s["start"], "duration": s["duration"], "timestamp": format_timestamp(s["start"]),
                  "text": s["text"], "url": f"https://www.youtube.com/watch?v={video_id}&t={int(s['start'])}s"}
                 for s in db.get_segments(video_id)]
-        return {**_video_out(r), "description": r["description"] or "", "segments": segs}
 
-    @app.get("/favicon.ico", include_in_schema=False)
-    def favicon():
-        ico = WEB_DIR / "favicon.ico"
-        return FileResponse(ico, media_type="image/x-icon") if ico.exists() else Response(status_code=204)
+    @app.get("/api/chunks", response_model=ChunkListOut, dependencies=[Depends(require_api_key)])
+    def chunks(video_id: str | None = Query(None), after: int = Query(0, ge=0, description="kurzor: poslední chunk_id"),
+               limit: int = Query(500, ge=1, le=2000),
+               with_embeddings: bool = Query(False, description="přidat embedding (base64 float32)")):
+        """Hromadné čtení úseků (stránkování kurzorem). Pro celý index je levnější /api/export."""
+        rows = db.list_chunks(video_id=video_id, after=after, limit=limit, with_embeddings=with_embeddings)
+        items = []
+        for r in rows:
+            if with_embeddings:
+                r["embedding"] = embedding_b64(r["embedding"]) if r.get("embedding") else None
+            else:
+                r.pop("embedding", None)
+            items.append(r)
+        return {"index_version": index_version(db), "embedding_dim": db.embedding_dim,
+                "next_after": rows[-1]["chunk_id"] if len(rows) == limit else None, "items": items}
+
+    @app.get("/api/changes", response_model=ChangesOut, dependencies=[Depends(require_api_key)])
+    def changes(since: str = Query(..., description="updated_at, od kterého vracet změny (ISO nebo 'YYYY-MM-DD HH:MM:SS', UTC)"),
+                limit: int = Query(500, ge=1, le=2000)):
+        """Videa změněná od zadaného času (nový/opravený přepis, metadata). Inkrementální synchronizace."""
+        rows = db.videos_changed_since(since.replace("T", " ").replace("Z", ""), limit=limit)
+        items = [_video_out(r) for r in rows]
+        return {"index_version": index_version(db), "since": since,
+                "next_since": items[-1]["updated_at"] if len(items) == limit else None, "items": items}
+
+    export_gcs = os.environ.get("YTINDEX_EXPORT_GCS", "")          # gs://bucket/prefix s exportem
+    export_public = os.environ.get("YTINDEX_EXPORT_PUBLIC", "") == "1"   # bucket je veřejný → přímé URL
+    export_dir = Path(os.environ.get("YTINDEX_EXPORT_DIR", "data/export"))
+    export_names = (*FILES, "manifest.json")
+
+    @lru_cache(maxsize=1)
+    def _manifest_cached(version_key: str):
+        if export_gcs:
+            return read_manifest_gcs(export_gcs)
+        p = export_dir / "manifest.json"
+        return __import__("json").loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+    @app.get("/api/export", response_model=ExportOut)
+    def export_manifest():
+        """Manifest hromadného exportu: verze indexu a odkazy na soubory (JSONL + NumPy + SQLite).
+
+        Soubory se stahují z /api/export/files/{name} (proxy z bucketu), nebo přímo z bucketu, je-li veřejný.
+        """
+        manifest = _manifest_cached(index_version(db))
+        if manifest is None:
+            raise HTTPException(404, "Export zatím neexistuje (spusť `ytindex export`)")
+        if export_gcs and export_public:
+            urls = public_urls(export_gcs)
+        else:
+            urls = {name: f"/api/export/files/{name}" for name in export_names}
+        files = {name: {"url": url, "size": manifest.get("files", {}).get(name, {}).get("size"),
+                        "sha256": manifest.get("files", {}).get(name, {}).get("sha256")} for name, url in urls.items()}
+        gcs_db = os.environ.get("YTINDEX_GCS_DB", "")
+        if gcs_db:
+            files["index.sqlite"] = {"url": f"https://storage.googleapis.com/{gcs_db[5:]}" if export_public
+                                     else "/api/export/files/index.sqlite"}
+        return {"index_version": manifest.get("version") or index_version(db), "generated_at": manifest.get("generated_at"),
+                "counts": manifest.get("counts"), "embedding": manifest.get("embedding"), "files": files,
+                "notes": manifest.get("notes")}
+
+    @app.get("/api/export/files/{name}", include_in_schema=False, dependencies=[Depends(require_api_key)])
+    def export_file(name: str):
+        name = Path(name).name
+        if name == "index.sqlite":
+            gcs_db = os.environ.get("YTINDEX_GCS_DB", "")
+            if gcs_db:
+                bucket, _, path = gcs_db[5:].partition("/")
+                stream, size = open_gcs_file(f"gs://{bucket}", path)
+                if stream is None:
+                    raise HTTPException(404, "Index v bucketu neexistuje")
+                return StreamingResponse(stream, media_type="application/vnd.sqlite3",
+                                         headers={"Content-Length": str(size), "Content-Disposition": "attachment; filename=index.sqlite"})
+            return FileResponse(db.path, filename="index.sqlite") if getattr(db, "path", None) else Response(status_code=404)
+        if name not in export_names:
+            raise HTTPException(404, "Soubor neexistuje")
+        if export_gcs:
+            stream, size = open_gcs_file(export_gcs, name)
+            if stream is None:
+                raise HTTPException(404, "Soubor v bucketu neexistuje")
+            return StreamingResponse(stream, media_type="application/octet-stream",
+                                     headers={"Content-Length": str(size), "Content-Disposition": f"attachment; filename={name}"})
+        p = export_dir / name
+        if not p.exists():
+            raise HTTPException(404, "Soubor neexistuje")
+        return FileResponse(p, filename=name)
 
     @app.get("/", include_in_schema=False)
     def index():

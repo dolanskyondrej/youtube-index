@@ -51,6 +51,9 @@ RULES: list[tuple[str, Limiter, Limiter]] = [
     ("/api/ask",     Limiter(rate_per_min=6,  burst=3),  Limiter(rate_per_min=30, burst=10)),   # Gemini generace: drahé
     ("/api/context", Limiter(rate_per_min=30, burst=10), Limiter(rate_per_min=240, burst=60)),
     ("/api/search",  Limiter(rate_per_min=60, burst=20), Limiter(rate_per_min=600, burst=100)),
+    ("/api/chunks",  Limiter(rate_per_min=120, burst=60), Limiter(rate_per_min=600, burst=200)),   # hromadné čtení
+    ("/api/changes", Limiter(rate_per_min=60, burst=20), Limiter(rate_per_min=300, burst=60)),
+    ("/api/export",  Limiter(rate_per_min=30, burst=10), Limiter(rate_per_min=120, burst=30)),
     ("/mcp",         Limiter(rate_per_min=60, burst=20), Limiter(rate_per_min=600, burst=100)),
     ("/api/",        Limiter(rate_per_min=120, burst=40), Limiter(rate_per_min=1200, burst=200)),
 ]
