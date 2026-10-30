@@ -17,7 +17,7 @@ from . import __version__
 from .chunking import format_timestamp
 from .config import Config, load_config
 from .db import open_database
-from .export import FILES, embedding_b64, index_version, open_gcs_file, parse_gaps, public_urls, read_manifest_gcs
+from .export import FILES, embedding_b64, index_version, iter_blob_ranges, open_gcs_file, parse_gaps, public_urls, read_manifest_gcs
 from .ratelimit import rate_limit_middleware
 from .research import answer as rag_answer, gather_context
 from .search import hit_to_dict, search
@@ -378,8 +378,8 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 "counts": manifest.get("counts"), "embedding": manifest.get("embedding"), "files": files,
                 "notes": manifest.get("notes")}
 
-    def _stream_blob(stream, size: int, name: str, media_type: str, range_header: str | None):
-        """Streamování po 1 MB blocích; podporuje jednoduchý Range (bytes=a-b) pro navazování stahování."""
+    def _stream_blob(blob, size: int, name: str, media_type: str, range_header: str | None):
+        """Streamování po blocích (samostatné range requesty do GCS); podporuje HTTP Range pro navazování."""
         start, end = 0, size - 1
         status = 200
         if range_header and range_header.startswith("bytes="):
@@ -390,31 +390,14 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             except ValueError:
                 start, end = 0, size - 1
             if start >= size or end < start:
-                stream.close()
                 raise HTTPException(416, "Range mimo soubor", headers={"Content-Range": f"bytes */{size}"})
             end = min(end, size - 1)
             status = 206
-        if start:
-            stream.seek(start)
-        remaining = end - start + 1
-
-        def gen():
-            left = remaining
-            try:
-                while left > 0:
-                    block = stream.read(min(1 << 20, left))
-                    if not block:
-                        break
-                    left -= len(block)
-                    yield block
-            finally:
-                stream.close()
-
-        headers = {"Content-Length": str(remaining), "Accept-Ranges": "bytes",
+        headers = {"Content-Length": str(end - start + 1), "Accept-Ranges": "bytes",
                    "Content-Disposition": f"attachment; filename={name}"}
         if status == 206:
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        return StreamingResponse(gen(), status_code=status, media_type=media_type, headers=headers)
+        return StreamingResponse(iter_blob_ranges(blob, start, end), status_code=status, media_type=media_type, headers=headers)
 
     @app.get("/api/export/files/{name}", include_in_schema=False, dependencies=[Depends(require_api_key)])
     def export_file(name: str, request: Request):
@@ -424,18 +407,18 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
             gcs_db = os.environ.get("YTINDEX_GCS_DB", "")
             if gcs_db:
                 bucket, _, path = gcs_db[5:].partition("/")
-                stream, size = open_gcs_file(f"gs://{bucket}", path)
-                if stream is None:
+                blob, size = open_gcs_file(f"gs://{bucket}", path)
+                if blob is None:
                     raise HTTPException(404, "Index v bucketu neexistuje")
-                return _stream_blob(stream, size, name, "application/vnd.sqlite3", rng)
+                return _stream_blob(blob, size, name, "application/vnd.sqlite3", rng)
             return FileResponse(db.path, filename="index.sqlite") if getattr(db, "path", None) else Response(status_code=404)
         if name not in export_names:
             raise HTTPException(404, "Soubor neexistuje")
         if export_gcs:
-            stream, size = open_gcs_file(export_gcs, name)
-            if stream is None:
+            blob, size = open_gcs_file(export_gcs, name)
+            if blob is None:
                 raise HTTPException(404, "Soubor v bucketu neexistuje")
-            return _stream_blob(stream, size, name, "application/octet-stream", rng)
+            return _stream_blob(blob, size, name, "application/octet-stream", rng)
         p = export_dir / name
         if not p.exists():
             raise HTTPException(404, "Soubor neexistuje")

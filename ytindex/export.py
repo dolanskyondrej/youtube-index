@@ -153,14 +153,25 @@ def read_manifest_gcs(gs_prefix: str) -> dict | None:
 
 
 def open_gcs_file(gs_prefix: str, name: str):
-    """(stream, velikost) souboru exportu v bucketu – pro proxy přes API, když bucket není veřejný."""
+    """(blob, velikost) souboru exportu v bucketu – pro proxy přes API, když bucket není veřejný."""
     from google.cloud import storage
 
     bucket_name, _, prefix = gs_prefix[5:].partition("/")
     blob = storage.Client().bucket(bucket_name).get_blob(f"{prefix.strip('/')}/{name}" if prefix.strip("/") else name)
     if blob is None:
         return None, 0
-    return blob.open("rb"), blob.size
+    return blob, blob.size
+
+
+def iter_blob_ranges(blob, start: int, end: int, block: int = 8 << 20):
+    """Čte objekt po blocích samostatnými (opakovatelnými) range requesty – odolné proti přerušení spojení."""
+    from google.cloud.storage.retry import DEFAULT_RETRY
+
+    pos = start
+    while pos <= end:
+        last = min(pos + block - 1, end)
+        yield blob.download_as_bytes(start=pos, end=last, retry=DEFAULT_RETRY)
+        pos = last + 1
 
 
 def public_urls(gs_prefix: str) -> dict[str, str]:
