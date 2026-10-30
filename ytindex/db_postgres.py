@@ -248,6 +248,9 @@ class PostgresDatabase:
         row = self._one("SELECT COUNT(embedding) AS e, COUNT(*) AS c FROM chunks")
         return int(row["e"]), int(row["c"])
 
+    def delete_orphan_vectors(self) -> int:
+        return 0   # vektor je sloupec chunku, sirotci nevznikají
+
     def chunk_ids(self, video_id: str) -> dict[int, int]:
         return {r["idx"]: r["id"] for r in self._all("SELECT id, idx FROM chunks WHERE video_id=%s", (video_id,))}
 

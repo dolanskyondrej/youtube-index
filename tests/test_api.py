@@ -44,3 +44,14 @@ def test_reloadable_database_swaps_underlying_db(cfg, db):
     holder.swap(other)
     assert client.get("/api/channel").json()["name"] == "Nový"
     assert client.get("/api/search", params={"q": "bitcoin"}).json()["total"] == 0
+
+
+def test_store_transcript_removes_old_vectors(cfg, db):
+    from ytindex.chunking import Segment, chunk_segments
+    rows = db.pending_embeddings(limit=100)
+    db.store_embeddings([(r["id"], [0.1] * db.embedding_dim) for r in rows])
+    n_before = db.conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
+    segs = [Segment(0, 5, "nový přepis"), Segment(5, 5, "druhá věta")]
+    db.store_transcript("vid00000001", segs, chunk_segments(segs), "gemini", None)
+    n_after = db.conn.execute("SELECT COUNT(*) FROM chunk_vec").fetchone()[0]
+    assert n_after < n_before and db.delete_orphan_vectors() == 0

@@ -226,11 +226,11 @@ class Database:
     def store_transcript(self, video_id: str, segments: list[Segment], chunks: list[Chunk],
                          source: str, lang: str | None) -> None:
         with self.tx() as c:
-            c.execute("DELETE FROM segments WHERE video_id=?", (video_id,))
-            c.execute("DELETE FROM chunks WHERE video_id=?", (video_id,))
-            if self.vec_available:
+            if self.vec_available:   # vektory mazat PŘED chunky (poddotaz by jinak nic nenašel → sirotci)
                 c.execute("DELETE FROM chunk_vec WHERE chunk_id IN "
                           "(SELECT id FROM chunks WHERE video_id=?)", (video_id,))
+            c.execute("DELETE FROM segments WHERE video_id=?", (video_id,))
+            c.execute("DELETE FROM chunks WHERE video_id=?", (video_id,))
             c.executemany(
                 "INSERT INTO segments(video_id, idx, start, duration, text) VALUES (?,?,?,?,?)",
                 [(video_id, i, s.start, s.duration, s.text) for i, s in enumerate(segments)],
@@ -276,6 +276,17 @@ class Database:
     def count_embedded(self) -> tuple[int, int]:
         row = self.conn.execute("SELECT SUM(embedded), COUNT(*) FROM chunks").fetchone()
         return int(row[0] or 0), int(row[1] or 0)
+
+    def delete_orphan_vectors(self) -> int:
+        """Smaže vektory bez chunku (po přepsání videa). Vrací počet smazaných."""
+        if not self.vec_available:
+            return 0
+        ids = [r[0] for r in self.conn.execute(
+            "SELECT v.chunk_id FROM chunk_vec v LEFT JOIN chunks c ON c.id = v.chunk_id WHERE c.id IS NULL")]
+        with self.tx() as c:
+            for cid in ids:
+                c.execute("DELETE FROM chunk_vec WHERE chunk_id=?", (cid,))
+        return len(ids)
 
     def chunk_ids(self, video_id: str) -> dict[int, int]:
         """{idx: chunk_id} pro video."""

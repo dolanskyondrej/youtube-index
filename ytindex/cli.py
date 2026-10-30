@@ -320,6 +320,9 @@ def run_embed(cfg: Config, db, quiet: bool = False) -> int:
             c.execute("UPDATE chunks SET embedded = 0") if db.backend == "sqlite" else c.execute("UPDATE chunks SET embedding = NULL")
     db.set_meta("embedding_model", cfg.gemini.embedding_model)
     db.conn.commit()
+    orphans = db.delete_orphan_vectors()
+    if orphans:
+        print(f"  smazáno {orphans} osiřelých vektorů")
     emb = Embedder(cfg)
     done, total = db.count_embedded()
     if done == total:
