@@ -393,8 +393,9 @@ def create_app(cfg: Config | None = None, db: Database | None = None, rate_limit
                 raise HTTPException(416, "Range mimo soubor", headers={"Content-Range": f"bytes */{size}"})
             end = min(end, size - 1)
             status = 206
-        headers = {"Content-Length": str(end - start + 1), "Accept-Ranges": "bytes",
-                   "Content-Disposition": f"attachment; filename={name}"}
+        # bez Content-Length: Cloud Run omezuje nestreamované odpovědi na 32 MB, chunked streaming limit nemá
+        headers = {"Accept-Ranges": "bytes", "Content-Disposition": f"attachment; filename={name}",
+                   "X-Content-Size": str(end - start + 1)}
         if status == 206:
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         return StreamingResponse(iter_blob_ranges(blob, start, end), status_code=status, media_type=media_type, headers=headers)
